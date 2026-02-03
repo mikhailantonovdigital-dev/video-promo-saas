@@ -1,0 +1,10 @@
+fastapi==0.115.8
+uvicorn[standard]==0.30.6
+pydantic==2.10.6
+pydantic-settings==2.7.1
+
+SQLAlchemy==2.0.36
+asyncpg==0.30.0
+
+python-jose[cryptography]==3.3.0
+passlib[argon2]==1.7.4
