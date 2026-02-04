@@ -97,11 +97,10 @@ from fastapi.responses import HTMLResponse
 SELLER = {
     "name": "ИП Антонова Евгения Юрьевна",
     "email": "inrestart@yandex.ru",
-    "telegram": "t.me/mikhailantonov19",
-    # TODO: Заполни обязательно — ЮKassa обычно требует
-    "inn": 121603658990,
-    "ogrnip": 322120000026481,
-    "address": 425003, РОССИЯ, РЕСП МАРИЙ ЭЛ, Г ВОЛЖСК, УЛ ПОЛЕВАЯ, Д 74,
+    "telegram": "@mikhailantonov19",
+    "inn": "121603658990",        # вставь ИНН строкой
+    "ogrnip": "322120000026481",  # вставь ОГРНИП строкой
+    "address": "425003, Россия, Респ. Марий Эл, г. Волжск, ул. Полевая, д. 74",
 }
 
 SLA_TEXT = "до 2 часов"
