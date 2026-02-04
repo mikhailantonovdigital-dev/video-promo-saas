@@ -118,3 +118,117 @@ async def pay_fail() -> str:
 </body>
 </html>
 """
+
+from fastapi.responses import HTMLResponse
+
+def _page(title: str, body: str) -> str:
+    return f"""<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>{title}</title>
+  <style>
+    body {{ font-family: system-ui,-apple-system,Arial,sans-serif; max-width: 900px; margin: 40px auto; padding: 0 16px; }}
+    nav a {{ margin-right: 12px; }}
+    .card {{ border: 1px solid #e5e7eb; border-radius: 16px; padding: 20px; }}
+    .muted {{ color:#6b7280; }}
+    footer {{ margin-top: 28px; color:#6b7280; font-size: 14px; }}
+  </style>
+</head>
+<body>
+  <nav>
+    <a href="/">Главная</a>
+    <a href="/pricing">Тарифы</a>
+    <a href="/how">Как работает</a>
+    <a href="/contacts">Контакты</a>
+    <a href="/legal/offer">Оферта</a>
+    <a href="/legal/privacy">Политика ПД</a>
+    <a href="/legal/refund">Возвраты</a>
+  </nav>
+  <div class="card">{body}</div>
+  <footer>© HypePack</footer>
+</body>
+</html>"""
+
+@app.get("/", response_class=HTMLResponse, include_in_schema=False)
+async def site_home() -> str:
+    return _page("HypePack — промо-видео для треков", """
+<h1>HypePack</h1>
+<p>Сервис для музыкантов: генерируем пакет вертикальных видео для продвижения трека.</p>
+<ul>
+  <li>Видео под вертикальные форматы</li>
+  <li>Тексты: заголовки/описания/хештеги + инструкции публикации</li>
+  <li>Вы публикуете сами, мы не занимаемся дистрибуцией</li>
+</ul>
+<p class="muted">Пользователь подтверждает права на контент и согласие на использование своего лица.</p>
+""")
+
+@app.get("/pricing", response_class=HTMLResponse, include_in_schema=False)
+async def site_pricing() -> str:
+    return _page("Тарифы — HypePack", """
+<h1>Тарифы</h1>
+<ul>
+  <li><b>Тест:</b> 1 видео</li>
+  <li><b>Пакет:</b> 30 видео (1/день на месяц)</li>
+  <li><b>Пакет:</b> 90 видео (3/день на месяц)</li>
+</ul>
+<p class="muted">Итоговая цена рассчитывается автоматически (не ниже 2× себестоимости).</p>
+""")
+
+@app.get("/how", response_class=HTMLResponse, include_in_schema=False)
+async def site_how() -> str:
+    return _page("Как работает — HypePack", """
+<h1>Как оказывается услуга</h1>
+<ol>
+  <li>Регистрация и подтверждение email</li>
+  <li>Оплата</li>
+  <li>Загрузка ваших фото → обучение профиля лица</li>
+  <li>Выбор стилей → фотосессия → подтверждение выбора</li>
+  <li>Загрузка видео-референсов → генерация видео</li>
+  <li>Скачивание архива: видео + тексты + инструкции</li>
+</ol>
+<p class="muted">Хранение файлов: 30 дней после выдачи результата, затем удаляем.</p>
+""")
+
+@app.get("/contacts", response_class=HTMLResponse, include_in_schema=False)
+async def site_contacts() -> str:
+    return _page("Контакты — HypePack", """
+<h1>Контакты</h1>
+<p>Email поддержки: <b>support@hypepack.ru</b> (замени на реальный)</p>
+<p>Telegram: <b>@your_contact</b> (замени на реальный)</p>
+<hr/>
+<p><b>Реквизиты продавца</b> (обязательно заполнить реальными данными):</p>
+<ul>
+  <li>Название: …</li>
+  <li>ИНН: …</li>
+  <li>ОГРН/ОГРНИП: …</li>
+  <li>Адрес: …</li>
+</ul>
+""")
+
+@app.get("/legal/offer", response_class=HTMLResponse, include_in_schema=False)
+async def legal_offer() -> str:
+    return _page("Оферта — HypePack", """
+<h1>Публичная оферта</h1>
+<p>Цифровая услуга: генерация промо-материалов (видео и тексты) для трека.</p>
+<p><b>Срок оказания:</b> до … (укажи реальный SLA).</p>
+<p><b>Права и согласия:</b> пользователь гарантирует права на контент и согласие на использование собственного лица.</p>
+""")
+
+@app.get("/legal/privacy", response_class=HTMLResponse, include_in_schema=False)
+async def legal_privacy() -> str:
+    return _page("Политика ПД — HypePack", """
+<h1>Политика обработки персональных данных</h1>
+<p>Обрабатываем email и загружаемые материалы (фото/видео) строго для оказания услуги.</p>
+<p>Срок хранения файлов: 30 дней после выдачи результата, затем удаление.</p>
+""")
+
+@app.get("/legal/refund", response_class=HTMLResponse, include_in_schema=False)
+async def legal_refund() -> str:
+    return _page("Возвраты — HypePack", """
+<h1>Возвраты и отмена</h1>
+<p>Если генерация ещё не запускалась — возможна отмена по запросу.</p>
+<p>Если генерация запущена — условия возврата описаны в оферте.</p>
+""")
+
