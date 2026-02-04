@@ -6,8 +6,14 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 def normalize_database_url(url: str) -> str:
-    # если у тебя уже была своя нормализация — можешь оставить её.
-    # Главное: возвращай строку подключения, которую понимает SQLAlchemy + asyncpg.
+    # Render часто отдаёт postgres://...
+    if url.startswith("postgres://"):
+        url = "postgresql://" + url[len("postgres://") :]
+
+    # переводим на asyncpg, чтобы НЕ нужен был psycopg2
+    if url.startswith("postgresql://") and "+asyncpg" not in url:
+        url = "postgresql+asyncpg://" + url[len("postgresql://") :]
+
     return url
 
 
