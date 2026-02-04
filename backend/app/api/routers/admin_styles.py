@@ -4,25 +4,31 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.session import AsyncSessionLocal
+from app.api.deps import get_db, require_admin
 from app.models.style import Style
 from app.schemas.style import StyleCreateIn, StyleOut, StyleUpdateIn
 
 router = APIRouter(prefix="/admin/styles", tags=["admin"])
 
-# В самом первом деплое у нас ещё нет админ-авторизации, поэтому оставим временно открытым.
-# На следующем шаге мы закроем это require_admin.
-# Сейчас задача: быстро поднять сервис и убедиться, что БД/деплой работают.
 
-@router.get("", response_model=list[StyleOut])
-async def admin_list_styles(db: AsyncSession = Depends(lambda: AsyncSessionLocal())) -> list[StyleOut]:
+@router.get("", response_model=list[StyleOut], dependencies=[Depends(require_admin)])
+async def admin_list_styles(db: AsyncSession = Depends(get_db)) -> list[StyleOut]:
     q = await db.execute(select(Style).order_by(Style.name.asc()))
     items = q.scalars().all()
-    return [StyleOut(id=str(s.id), code=s.code, name=s.name, description=s.description, is_active=s.is_active) for s in items]
+    return [
+        StyleOut(
+            id=str(s.id),
+            code=s.code,
+            name=s.name,
+            description=s.description,
+            is_active=s.is_active,
+        )
+        for s in items
+    ]
 
 
-@router.post("", response_model=StyleOut)
-async def admin_create_style(payload: StyleCreateIn, db: AsyncSession = Depends(lambda: AsyncSessionLocal())) -> StyleOut:
+@router.post("", response_model=StyleOut, dependencies=[Depends(require_admin)])
+async def admin_create_style(payload: StyleCreateIn, db: AsyncSession = Depends(get_db)) -> StyleOut:
     q = await db.execute(select(Style).where(Style.code == payload.code))
     if q.scalar_one_or_none():
         raise HTTPException(status_code=409, detail="Style code already exists")
@@ -31,11 +37,17 @@ async def admin_create_style(payload: StyleCreateIn, db: AsyncSession = Depends(
     db.add(s)
     await db.commit()
     await db.refresh(s)
-    return StyleOut(id=str(s.id), code=s.code, name=s.name, description=s.description, is_active=s.is_active)
+    return StyleOut(
+        id=str(s.id),
+        code=s.code,
+        name=s.name,
+        description=s.description,
+        is_active=s.is_active,
+    )
 
 
-@router.patch("/{style_id}", response_model=StyleOut)
-async def admin_update_style(style_id: str, payload: StyleUpdateIn, db: AsyncSession = Depends(lambda: AsyncSessionLocal())) -> StyleOut:
+@router.patch("/{style_id}", response_model=StyleOut, dependencies=[Depends(require_admin)])
+async def admin_update_style(style_id: str, payload: StyleUpdateIn, db: AsyncSession = Depends(get_db)) -> StyleOut:
     q = await db.execute(select(Style).where(Style.id == style_id))
     s = q.scalar_one_or_none()
     if not s:
@@ -49,4 +61,10 @@ async def admin_update_style(style_id: str, payload: StyleUpdateIn, db: AsyncSes
         s.is_active = payload.is_active
 
     await db.commit()
-    return StyleOut(id=str(s.id), code=s.code, name=s.name, description=s.description, is_active=s.is_active)
+    return StyleOut(
+        id=str(s.id),
+        code=s.code,
+        name=s.name,
+        description=s.description,
+        is_active=s.is_active,
+    )
