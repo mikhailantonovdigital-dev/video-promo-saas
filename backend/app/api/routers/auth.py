@@ -144,9 +144,28 @@ async def logout(response: Response) -> dict:
 
 
 @router.get("/me", response_model=MeOut)
-async def me(
-    access_token: str | None = None,
+async def me(user: User = Depends(get_current_user)) -> MeOut:
+    return MeOut(email=user.email, role=user.role, email_verified=bool(user.email_verified_at))
+
+from pydantic import EmailStr  # добавь импорт вверху, если нет
+
+@router.post("/bootstrap-admin")
+async def bootstrap_admin(
+    email: EmailStr,
+    token: str,
     db: AsyncSession = Depends(get_db),
-) -> MeOut:
-    # Упрощённо: в UI будем использовать /me после login (cookie уже есть).
-    raise HTTPException(status_code=501, detail="Use /me after we wire get_current_user in next step")
+) -> dict:
+    # Защита: только если задан секрет в env и он совпал
+    if not settings.admin_bootstrap_token or token != settings.admin_bootstrap_token:
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    q = await db.execute(select(User).where(User.email == str(email).lower()))
+    user = q.scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    if not user.email_verified_at:
+        raise HTTPException(status_code=400, detail="User email not verified")
+
+    user.role = "admin"
+    await db.commit()
+    return {"ok": True, "email": user.email, "role": user.role}
