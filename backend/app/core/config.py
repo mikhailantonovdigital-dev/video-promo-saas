@@ -33,5 +33,17 @@ class Settings(BaseSettings):
     def db_url(self) -> str:
         return normalize_database_url(self.database_url)
 
+    from pydantic import Field, AliasChoices
+
+    yookassa_shop_id: str | None = Field(default=None, validation_alias=AliasChoices("YOOKASSA_SHOP_ID"))
+    yookassa_secret_key: str | None = Field(default=None, validation_alias=AliasChoices("YOOKASSA_SECRET_KEY"))
+    yookassa_return_url: str | None = Field(default=None, validation_alias=AliasChoices("YOOKASSA_RETURN_URL"))
+    yookassa_api_base: str = "https://api.yookassa.ru/v3"
+    
+    cost_image_rub: float | None = Field(default=None, validation_alias=AliasChoices("COST_IMAGE_RUB"))
+    cost_video_rub: float | None = Field(default=None, validation_alias=AliasChoices("COST_VIDEO_RUB"))
+    cost_training_rub: float | None = Field(default=None, validation_alias=AliasChoices("COST_TRAINING_RUB"))
+    min_price_multiplier: float = Field(default=2.0, validation_alias=AliasChoices("MIN_PRICE_MULTIPLIER"))
+
 
 settings = Settings()
