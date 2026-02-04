@@ -22,6 +22,8 @@ class Settings(BaseSettings):
     database_url: str = Field(validation_alias=AliasChoices("DATABASE_URL", "database_url"))
     jwt_secret: str = Field(validation_alias=AliasChoices("JWT_SECRET", "jwt_secret"))
 
+    admin_bootstrap_token: str | None = Field(default=None, validation_alias=AliasChoices("ADMIN_BOOTSTRAP_TOKEN"))
+
     access_token_minutes: int = 60
     refresh_token_days: int = 30
 
