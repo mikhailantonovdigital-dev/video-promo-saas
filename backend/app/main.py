@@ -20,23 +20,27 @@ app = FastAPI(title="Video Promo SaaS", version="0.0.1")
 
 @app.on_event("startup")
 async def startup() -> None:
-    # Для MVP-скелета делаем auto-create таблиц.
-    # Позже заменим на Alembic миграции.
+    # 1) создаём таблицы
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-        from app.db.session import AsyncSessionLocal
-        from app.models.plan import Plan
-        from sqlalchemy import select
-        
-        async with AsyncSessionLocal() as db:
-            q = await db.execute(select(Plan))
-            if q.first() is None:
-                db.add_all([
+
+    # 2) сидируем планы (в отдельной сессии)
+    from sqlalchemy import select
+    from app.db.session import AsyncSessionLocal
+    from app.models.plan import Plan
+
+    async with AsyncSessionLocal() as db:
+        q = await db.execute(select(Plan).limit(1))
+        exists = q.scalar_one_or_none()
+        if not exists:
+            db.add_all(
+                [
                     Plan(code="test_1", title="1 тестовое видео", images_count=1, videos_count=1),
                     Plan(code="month_30", title="30 видео (1/день на месяц)", images_count=30, videos_count=30),
                     Plan(code="month_90", title="90 видео (3/день на месяц)", images_count=90, videos_count=90),
-                ])
-                await db.commit()
+                ]
+            )
+            await db.commit()
 
 
 @app.get("/health")
