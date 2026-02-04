@@ -20,4 +20,5 @@ services:
 
 databases:
   - name: video-promo-db
-    plan: starter
+    plan: basic-1gb
+    diskSizeGB: 10
