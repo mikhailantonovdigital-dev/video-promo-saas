@@ -59,3 +59,62 @@ app.include_router(checkout_router, prefix="/api/v1")
 app.include_router(webhooks_router, prefix="/api/v1")
 
 app.include_router(pay_pages_router)
+
+from fastapi.responses import HTMLResponse
+
+@app.get("/", response_class=HTMLResponse, include_in_schema=False)
+async def index() -> str:
+    return """
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>HypePack API</title>
+  <style>
+    body { font-family: system-ui, -apple-system, Arial, sans-serif; max-width: 720px; margin: 40px auto; padding: 0 16px; }
+    .card { border: 1px solid #e5e7eb; border-radius: 16px; padding: 20px; }
+    .btn { display:inline-block; padding: 12px 16px; border-radius: 12px; background:#111827; color:#fff; text-decoration:none; margin-right: 8px; }
+    .muted { color:#6b7280; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>HypePack API работает</h1>
+    <p class="muted">Это технический endpoint для сервиса. Пользовательский кабинет будет добавлен позже.</p>
+    <a class="btn" href="/docs">Swagger</a>
+    <a class="btn" href="/health">Health</a>
+  </div>
+</body>
+</html>
+"""
+
+@app.get("/pay/return", response_class=HTMLResponse, include_in_schema=False)
+async def pay_return() -> str:
+    return """
+<!doctype html>
+<html lang="ru">
+<head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Оплата принята</title></head>
+<body style="font-family:system-ui;max-width:720px;margin:40px auto;padding:0 16px">
+  <h1>Оплата принята</h1>
+  <p style="color:#6b7280">Мы подтверждаем платёж. Обычно это занимает до пары минут.</p>
+  <p><a href="/docs">Открыть панель</a></p>
+</body>
+</html>
+"""
+
+@app.get("/pay/fail", response_class=HTMLResponse, include_in_schema=False)
+async def pay_fail() -> str:
+    return """
+<!doctype html>
+<html lang="ru">
+<head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Оплата не прошла</title></head>
+<body style="font-family:system-ui;max-width:720px;margin:40px auto;padding:0 16px">
+  <h1>Оплата не прошла</h1>
+  <p style="color:#6b7280">Попробуйте ещё раз или напишите в поддержку.</p>
+  <p><a href="/docs">Вернуться</a></p>
+</body>
+</html>
+"""
