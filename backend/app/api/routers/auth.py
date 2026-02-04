@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from app.api.deps import get_db, get_current_user
+
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
@@ -29,7 +31,7 @@ def client_ip(req: Request) -> str | None:
 
 
 @router.post("/signup", status_code=201)
-async def signup(payload: SignupIn, request: Request, db: AsyncSession = Depends(lambda: AsyncSessionLocal())) -> dict:
+async def signup(payload: SignupIn, request: Request, db: AsyncSession = Depends(get_db)) -> dict:
     if not all(
         [
             payload.consent_rights,
@@ -76,7 +78,7 @@ async def signup(payload: SignupIn, request: Request, db: AsyncSession = Depends
 
 
 @router.post("/verify-email")
-async def verify_email(token: str, db: AsyncSession = Depends(lambda: AsyncSessionLocal())) -> dict:
+async def verify_email(token: str, db: AsyncSession = Depends(get_db)) -> dict:
     token_hash = sha256_hex(token)
     q = await db.execute(
         select(EmailVerification).where(
@@ -103,7 +105,7 @@ async def verify_email(token: str, db: AsyncSession = Depends(lambda: AsyncSessi
 
 
 @router.post("/login")
-async def login(payload: LoginIn, request: Request, response: Response, db: AsyncSession = Depends(lambda: AsyncSessionLocal())) -> dict:
+async def login(payload: LoginIn, request: Request, response: Response, db: AsyncSession = Depends(get_db)) -> dict:
     email = str(payload.email).lower()
     q = await db.execute(select(User).where(User.email == email))
     user = q.scalar_one_or_none()
@@ -144,7 +146,7 @@ async def logout(response: Response) -> dict:
 @router.get("/me", response_model=MeOut)
 async def me(
     access_token: str | None = None,
-    db: AsyncSession = Depends(lambda: AsyncSessionLocal()),
+    db: AsyncSession = Depends(get_db),
 ) -> MeOut:
     # Упрощённо: в UI будем использовать /me после login (cookie уже есть).
     raise HTTPException(status_code=501, detail="Use /me after we wire get_current_user in next step")
