@@ -15,6 +15,8 @@ from app.api.routers.plans import router as plans_router
 from app.api.routers.checkout import router as checkout_router
 from app.api.routers.webhooks import router as webhooks_router
 
+from app.api.routers.pay_pages import router as pay_pages_router
+
 app = FastAPI(title="Video Promo SaaS", version="0.0.1")
 
 
@@ -55,3 +57,5 @@ app.include_router(admin_styles_router, prefix="/api/v1")
 app.include_router(plans_router, prefix="/api/v1")
 app.include_router(checkout_router, prefix="/api/v1")
 app.include_router(webhooks_router, prefix="/api/v1")
+
+app.include_router(pay_pages_router)
