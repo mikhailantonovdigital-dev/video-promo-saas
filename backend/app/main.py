@@ -162,7 +162,6 @@ async def site_home() -> str:
 </ul>
 
 <p><a class="btn" href="/pricing">Посмотреть тарифы</a></p>
-<p class="muted">Для оформления заказа нужен личный кабинет (регистрация и подтверждение email).</p>
 """)
 
 
