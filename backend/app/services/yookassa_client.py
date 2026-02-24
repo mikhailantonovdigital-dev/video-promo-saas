@@ -1,8 +1,7 @@
-from __future__ import annotations
+# backend/app/services/yookassa_client.py
 
 from dataclasses import dataclass
 from decimal import Decimal
-
 import httpx
 
 
@@ -12,8 +11,17 @@ class YooKassaClient:
     shop_id: str
     secret_key: str
 
-    async def create_payment(self, *, amount_rub: int, return_url: str, description: str, idempotence_key: str, metadata: dict) -> dict:
-        # ЮKassa ожидает value строкой с 2 знаками
+    async def create_payment(
+        self,
+        *,
+        amount_rub: int,
+        return_url: str,
+        description: str,
+        idempotence_key: str,
+        metadata: dict,
+        customer_email: str,          # <-- ДОБАВИЛИ
+        vat_code: int = 1,            # <-- по умолчанию "без НДС"
+    ) -> dict:
         value = f"{Decimal(amount_rub):.2f}"
 
         payload = {
@@ -22,6 +30,21 @@ class YooKassaClient:
             "capture": True,
             "description": description,
             "metadata": metadata,
+
+            # <-- ВОТ ЭТОГО НЕ ХВАТАЛО
+            "receipt": {
+                "customer": {"email": customer_email},
+                "items": [
+                    {
+                        "description": "HypePack — цифровая услуга (пакет видео)",
+                        "quantity": 1.000,
+                        "amount": {"value": value, "currency": "RUB"},
+                        "vat_code": vat_code,
+                        "payment_mode": "full_payment",
+                        "payment_subject": "service",
+                    }
+                ],
+            },
         }
 
         headers = {"Idempotence-Key": idempotence_key}
@@ -31,15 +54,6 @@ class YooKassaClient:
                 f"{self.api_base}/payments",
                 json=payload,
                 headers=headers,
-                auth=(self.shop_id, self.secret_key),  # Basic Auth
-            )
-            r.raise_for_status()
-            return r.json()
-
-    async def get_payment(self, *, payment_id: str) -> dict:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            r = await client.get(
-                f"{self.api_base}/payments/{payment_id}",
                 auth=(self.shop_id, self.secret_key),
             )
             r.raise_for_status()
