@@ -105,7 +105,7 @@ async def cabinet_orders(
     )
     rows = q.all()
 
-    pq = await db.execute(select(Plan).order_by(Plan.sort_order.asc()))
+    pq = await db.execute(select(Plan).order_by(Plan.code.asc()))
     plans = pq.scalars().all()
 
     items_html = ""
@@ -270,7 +270,11 @@ async def cabinet_order(
     sq = await db.execute(select(OrderStyle).where(OrderStyle.order_id == order.id).order_by(OrderStyle.created_at.asc()))
     selected_styles = [s.style_code for s in sq.scalars().all()]
 
-    stq = await db.execute(select(Style).where(Style.is_active.is_(True)).order_by(Style.sort_order.asc()))
+    stq = await db.execute(
+        select(Style)
+        .where(Style.is_active.is_(True))
+        .order_by(Style.weight.asc(), Style.created_at.asc())
+    )
     styles = stq.scalars().all()
 
     styles_checkboxes = ""
@@ -279,7 +283,7 @@ async def cabinet_order(
         styles_checkboxes += f"""
         <label style="display:block;margin:6px 0">
           <input type="checkbox" name="style_codes" value="{s.code}" {checked}>
-          <b>{s.title}</b> <span class="muted">({s.code})</span>
+          <b>{s.name}</b> <span class="muted">({s.code})</span>
         </label>
         """
 
