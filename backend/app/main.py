@@ -30,7 +30,7 @@ YOOKASSA_SECRET_KEY = os.getenv("YOOKASSA_SECRET_KEY", "")
 YOOKASSA_RETURN_URL = os.getenv("YOOKASSA_RETURN_URL", "https://hypepack.ru/payment/return")
 
 PLAN_PRICES = {
-    "test_1": Decimal("500.00"),
+    "test_1": Decimal("5.00"),
     "pack_30": Decimal("6000.00"),
     "pack_90": Decimal("13500.00"),
 }
@@ -187,7 +187,7 @@ async def site_pricing() -> str:
 <p>Оплата единая за услугу. После оплаты вы проходите этапы: загрузка фото → выбор стилей → подтверждение фотосессии → загрузка видео-референсов → генерация → скачивание архива.</p>
 
 <ul>
-  <li><b>Тест</b>: 1 видео — <b>500 ₽</b></li>
+  <li><b>Тест</b>: 1 видео — <b>5 ₽</b></li>
   <li><b>Пакет</b>: 30 видео (1/день на месяц) — <b>6000 ₽</b></li>
   <li><b>Пакет</b>: 90 видео (3/день на месяц) — <b>13500 ₽</b></li>
 </ul>
