@@ -20,6 +20,17 @@ from app.models.asset import Asset
 from app.models.order_style import OrderStyle
 from app.models.style import Style
 
+from fastapi import Form, Response, status
+
+from app.core.config import settings
+from app.core.security import (
+    create_access_token,
+    create_refresh_token,
+    sha256_hex,
+    verify_password,
+)
+from app.models.session_token import UserSession
+
 router = APIRouter(prefix="/cabinet", tags=["cabinet"], include_in_schema=False)
 
 FILES_TTL_DAYS = int(os.getenv("FILES_TTL_DAYS", "30"))
@@ -129,6 +140,85 @@ async def cabinet_orders(
     {items_html if items_html else '<p class="muted">Пока нет заказов.</p>'}
     """
     return _page("Кабинет — Заказы", body)
+
+
+@router.get("/login")
+async def cabinet_login_page(error: str | None = None):
+    _ensure_enabled()
+    err = f"<p style='color:#b91c1c'><b>{error}</b></p>" if error else ""
+    return _page("Вход — Кабинет", f"""
+<h1>Вход</h1>
+<p class="muted">Войдите, чтобы открыть кабинет.</p>
+{err}
+<form method="post" action="/cabinet/login">
+  <p><input name="email" type="email" required placeholder="Email" style="width:320px"></p>
+  <p><input name="password" type="password" required placeholder="Пароль" style="width:320px"></p>
+  <p><button class="btn" type="submit">Войти</button></p>
+</form>
+<p class="muted">Если email не подтверждён — сначала подтвердите его (пока через API).</p>
+""")
+
+
+@router.post("/login")
+async def cabinet_login_submit(
+    email: str = Form(...),
+    password: str = Form(...),
+    db: AsyncSession = Depends(get_db),
+):
+    _ensure_enabled()
+
+    email_norm = str(email).lower().strip()
+
+    q = await db.execute(select(User).where(User.email == email_norm))
+    user = q.scalar_one_or_none()
+    if not user or not user.is_active or not verify_password(password, user.password_hash):
+        return RedirectResponse("/cabinet/login?error=Неверный+логин+или+пароль", status_code=302)
+
+    if not user.email_verified_at:
+        return RedirectResponse("/cabinet/login?error=Email+не+подтверждён", status_code=302)
+
+    access = create_access_token(sub=str(user.id))
+    refresh = create_refresh_token(sub=str(user.id))
+
+    sess = UserSession(
+        user_id=user.id,
+        refresh_token_hash=sha256_hex(refresh),
+        expires_at=_now() + timedelta(days=settings.refresh_token_days),
+    )
+    db.add(sess)
+
+    user.last_login_at = _now()
+    await db.commit()
+
+    resp = RedirectResponse("/cabinet/orders", status_code=302)
+
+    secure_cookie = settings.env == "prod"
+    resp.set_cookie(
+        "access_token",
+        access,
+        httponly=True,
+        secure=secure_cookie,
+        samesite="lax",
+        max_age=60 * settings.access_token_minutes,
+    )
+    resp.set_cookie(
+        "refresh_token",
+        refresh,
+        httponly=True,
+        secure=secure_cookie,
+        samesite="lax",
+        max_age=60 * 60 * 24 * settings.refresh_token_days,
+    )
+    return resp
+
+
+@router.post("/logout")
+async def cabinet_logout():
+    _ensure_enabled()
+    resp = RedirectResponse("/cabinet/login", status_code=302)
+    resp.delete_cookie("access_token")
+    resp.delete_cookie("refresh_token")
+    return resp
 
 
 @router.post("/orders/create")
