@@ -27,6 +27,8 @@ from app.api.routers.admin import router as admin_router
 
 from app.api.routers.orders import router as orders_router
 
+from app.site_cabinet import router as cabinet_router
+
 app = FastAPI(title="Video Promo SaaS", version="0.0.1")
 
 YOOKASSA_SHOP_ID = os.getenv("YOOKASSA_SHOP_ID", "")
@@ -82,6 +84,8 @@ app.include_router(pay_pages_router)
 app.include_router(admin_router, prefix="/api/v1")
 
 app.include_router(orders_router, prefix="/api/v1")
+
+app.include_router(cabinet_router)
 
 from fastapi.responses import HTMLResponse
 
