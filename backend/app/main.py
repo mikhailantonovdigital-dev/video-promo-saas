@@ -1,3 +1,12 @@
+import os
+import uuid
+from decimal import Decimal
+
+import httpx
+from fastapi imp
+ort Request, HTTPException
+from fastapi.responses import RedirectResponse, JSONResponse
+
 from __future__ import annotations
 
 from fastapi import FastAPI
@@ -19,6 +28,15 @@ from app.api.routers.pay_pages import router as pay_pages_router
 
 app = FastAPI(title="Video Promo SaaS", version="0.0.1")
 
+YOOKASSA_SHOP_ID = os.getenv("YOOKASSA_SHOP_ID", "")
+YOOKASSA_SECRET_KEY = os.getenv("YOOKASSA_SECRET_KEY", "")
+YOOKASSA_RETURN_URL = os.getenv("YOOKASSA_RETURN_URL", "https://hypepack.ru/payment/return")
+
+PLAN_PRICES = {
+    "test_1": Decimal("500.00"),
+    "pack_30": Decimal("14900.00"),  # <-- поменяй на свои
+    "pack_90": Decimal("39900.00"),  # <-- поменяй на свои
+}
 
 @app.on_event("startup")
 async def startup() -> None:
@@ -177,11 +195,71 @@ async def site_pricing() -> str:
   <li><b>Пакет</b>: 90 видео (3/день на месяц) — <b>13500 ₽</b></li>
 </ul>
 
+<p>
+  <a href="/pay?plan=test_1">Оплатить 1 видео</a><br>
+  <a href="/pay?plan=pack_30">Оплатить 30 видео</a><br>
+  <a href="/pay?plan=pack_90">Оплатить 90 видео</a>
+</p>
+
 <p class="muted">
 Цены указаны в рублях. Итоговая сумма фиксируется перед оплатой и отображается в платёжной форме YooKassa.
 </p>
 """)
 
+
+@app.get("/pay", include_in_schema=False)
+async def pay(plan: str):
+    if plan not in PLAN_PRICES:
+        raise HTTPException(status_code=400, detail="Unknown plan")
+    if not YOOKASSA_SHOP_ID or not YOOKASSA_SECRET_KEY:
+        raise HTTPException(status_code=500, detail="YooKassa is not configured")
+
+    amount = PLAN_PRICES[plan]
+    idempotence_key = str(uuid.uuid4())
+
+    payload = {
+        "amount": {"value": f"{amount:.2f}", "currency": "RUB"},
+        "capture": True,
+        "confirmation": {"type": "redirect", "return_url": YOOKASSA_RETURN_URL},
+        "description": f"HypePack: {plan}",
+        "metadata": {"plan": plan},
+    }
+
+    async with httpx.AsyncClient(timeout=20.0, auth=(YOOKASSA_SHOP_ID, YOOKASSA_SECRET_KEY)) as client:
+        r = await client.post(
+            "https://api.yookassa.ru/v3/payments",
+            json=payload,
+            headers={"Idempotence-Key": idempotence_key},
+        )
+
+    if r.status_code >= 400:
+        raise HTTPException(status_code=502, detail=f"YooKassa error: {r.text}")
+
+    data = r.json()
+    confirmation_url = (data.get("confirmation") or {}).get("confirmation_url")
+    if not confirmation_url:
+        raise HTTPException(status_code=502, detail="No confirmation_url from YooKassa")
+
+    return RedirectResponse(url=confirmation_url, status_code=302)
+
+
+@app.post("/api/billing/yookassa/webhook", include_in_schema=False)
+async def yookassa_webhook(request: Request):
+    payload = await request.json()
+    # event: payment.succeeded / payment.canceled
+    # object.id: id платежа в YooKassa
+    # object.status: succeeded/canceled/pending...
+    # TODO: здесь позже сохраним в БД и активируем заказ
+    return JSONResponse({"ok": True})
+
+
+@app.get("/payment/return", response_class=HTMLResponse, include_in_schema=False)
+async def payment_return() -> str:
+    return _page("Оплата — HypePack", """
+<h1>Оплата</h1>
+<p>Платёж обрабатывается. Если деньги списались — заказ появится в личном кабинете.</p>
+<p>Если возникли вопросы: Telegram @mikhailantonov19 или inrestart@yandex.ru</p>
+""")
 
 
 @app.get("/how", response_class=HTMLResponse, include_in_schema=False)
