@@ -15,6 +15,8 @@ from app.models.plan import Plan
 from app.models.user import User
 from app.services.yookassa_client import YooKassaClient
 
+import uuid
+
 router = APIRouter(prefix="/checkout", tags=["checkout"])
 
 
@@ -99,6 +101,65 @@ async def create_checkout(
         confirmation_url=confirmation_url,
     )
     db.add(pay)
+    await db.commit()
+
+    return {"order_id": str(order.id), "payment_id": yk_id, "confirmation_url": confirmation_url}
+
+
+@router.post("/retry")
+async def retry_checkout(
+    payload: dict,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    _ensure_yookassa_configured()
+
+    order_id = str(payload.get("order_id") or "").strip()
+    if not order_id:
+        raise HTTPException(status_code=400, detail="order_id is required")
+
+    oq = await db.execute(select(Order).where(Order.id == order_id, Order.user_id == user.id))
+    order = oq.scalar_one_or_none()
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    if order.status not in {"payment_pending", "canceled"}:
+        raise HTTPException(status_code=409, detail=f"Order status does not allow retry: {order.status}")
+
+    # создаём новый платеж (новый idempotence key!)
+    client = YooKassaClient(
+        api_base=settings.yookassa_api_base,
+        shop_id=settings.yookassa_shop_id,
+        secret_key=settings.yookassa_secret_key,
+    )
+
+    yk = await client.create_payment(
+        amount_rub=order.price_rub,
+        return_url=settings.yookassa_return_url,
+        description=f"Video Promo SaaS order {order.id} (retry)",
+        idempotence_key=str(uuid.uuid4()),
+        metadata={"order_id": str(order.id), "user_id": str(user.id)},
+        customer_email=user.email,  # важно для чека (54-ФЗ)
+    )
+
+    yk_id = yk.get("id")
+    confirmation_url = (yk.get("confirmation") or {}).get("confirmation_url")
+    status = yk.get("status") or "pending"
+
+    if not yk_id:
+        raise HTTPException(status_code=502, detail="YooKassa: no payment id")
+
+    pay = Payment(
+        order_id=order.id,
+        provider="yookassa",
+        provider_payment_id=yk_id,
+        status=status,
+        amount_rub=order.price_rub,
+        confirmation_url=confirmation_url,
+    )
+    db.add(pay)
+
+    order.status = "payment_pending"
     await db.commit()
 
     return {"order_id": str(order.id), "payment_id": yk_id, "confirmation_url": confirmation_url}
