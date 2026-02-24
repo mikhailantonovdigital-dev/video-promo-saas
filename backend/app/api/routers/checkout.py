@@ -50,6 +50,10 @@ async def create_checkout(
     cost = plan.images_count * settings.cost_image_rub + plan.videos_count * settings.cost_video_rub + settings.cost_training_rub
     price = int(math.ceil(cost * settings.min_price_multiplier))
 
+    # временно: тестовый тариф за 5 ₽
+    if plan.code == "test_1":
+        price = 5
+
     order = Order(
         user_id=user.id,
         plan_id=plan.id,
