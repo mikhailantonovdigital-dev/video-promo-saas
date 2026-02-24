@@ -204,12 +204,22 @@ async def site_pricing() -> str:
 """)
 
 
-@app.get("/pay", include_in_schema=False)
-async def pay(plan: str):
+@app.get("/pay", response_class=HTMLResponse, include_in_schema=False)
+async def pay(plan: str, email: str | None = None):
     if plan not in PLAN_PRICES:
         raise HTTPException(status_code=400, detail="Unknown plan")
-    if not YOOKASSA_SHOP_ID or not YOOKASSA_SECRET_KEY:
-        raise HTTPException(status_code=500, detail="YooKassa is not configured")
+
+    if not email:
+        # простая форма, чтобы не таскать email в URL
+        return _page("Оплата — HypePack", f"""
+<h1>Оплата</h1>
+<p class="muted">Для чека YooKassa нужен email покупателя.</p>
+<form method="get" action="/pay">
+  <input type="hidden" name="plan" value="{plan}">
+  <p><input name="email" type="email" required placeholder="email для чека" style="padding:10px;border:1px solid #e5e7eb;border-radius:10px;width:320px"></p>
+  <p><button class="btn" type="submit">Перейти к оплате</button></p>
+</form>
+""")
 
     amount = PLAN_PRICES[plan]
     idempotence_key = str(uuid.uuid4())
@@ -220,6 +230,20 @@ async def pay(plan: str):
         "confirmation": {"type": "redirect", "return_url": YOOKASSA_RETURN_URL},
         "description": f"HypePack: {plan}",
         "metadata": {"plan": plan},
+
+        "receipt": {
+            "customer": {"email": email},
+            "items": [
+                {
+                    "description": "HypePack — цифровая услуга (пакет видео)",
+                    "quantity": 1.000,
+                    "amount": {"value": f"{amount:.2f}", "currency": "RUB"},
+                    "vat_code": 1,
+                    "payment_mode": "full_payment",
+                    "payment_subject": "service",
+                }
+            ],
+        },
     }
 
     async with httpx.AsyncClient(timeout=20.0, auth=(YOOKASSA_SHOP_ID, YOOKASSA_SECRET_KEY)) as client:
@@ -232,11 +256,7 @@ async def pay(plan: str):
     if r.status_code >= 400:
         raise HTTPException(status_code=502, detail=f"YooKassa error: {r.text}")
 
-    data = r.json()
-    confirmation_url = (data.get("confirmation") or {}).get("confirmation_url")
-    if not confirmation_url:
-        raise HTTPException(status_code=502, detail="No confirmation_url from YooKassa")
-
+    confirmation_url = (r.json().get("confirmation") or {}).get("confirmation_url")
     return RedirectResponse(url=confirmation_url, status_code=302)
 
 
