@@ -23,6 +23,8 @@ from app.api.routers.webhooks import router as webhooks_router
 
 from app.api.routers.pay_pages import router as pay_pages_router
 
+from app.api.routers.admin import router as admin_router
+
 app = FastAPI(title="Video Promo SaaS", version="0.0.1")
 
 YOOKASSA_SHOP_ID = os.getenv("YOOKASSA_SHOP_ID", "")
@@ -74,6 +76,8 @@ app.include_router(checkout_router, prefix="/api/v1")
 app.include_router(webhooks_router, prefix="/api/v1")
 
 app.include_router(pay_pages_router)
+
+app.include_router(admin_router, prefix="/api/v1")
 
 from fastapi.responses import HTMLResponse
 
