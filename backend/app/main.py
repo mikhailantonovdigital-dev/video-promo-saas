@@ -31,6 +31,19 @@ from app.site_cabinet import router as cabinet_router
 
 app = FastAPI(title="Video Promo SaaS", version="0.0.1")
 
+from fastapi import Request
+from fastapi.exceptions import HTTPException
+from fastapi.responses import RedirectResponse
+from starlette.status import HTTP_303_SEE_OTHER
+
+@app.exception_handler(HTTPException)
+async def cabinet_auth_redirect(request: Request, exc: HTTPException):
+    # Редиректим только кабинет
+    if exc.status_code == 401 and request.url.path.startswith("/cabinet"):
+        return RedirectResponse(url="/cabinet/login", status_code=HTTP_303_SEE_OTHER)
+    # остальные HTTPException — как обычно
+    raise exc
+
 YOOKASSA_SHOP_ID = os.getenv("YOOKASSA_SHOP_ID", "")
 YOOKASSA_SECRET_KEY = os.getenv("YOOKASSA_SECRET_KEY", "")
 YOOKASSA_RETURN_URL = os.getenv("YOOKASSA_RETURN_URL", "https://hypepack.ru/payment/return")
