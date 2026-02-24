@@ -31,8 +31,8 @@ YOOKASSA_RETURN_URL = os.getenv("YOOKASSA_RETURN_URL", "https://hypepack.ru/paym
 
 PLAN_PRICES = {
     "test_1": Decimal("500.00"),
-    "pack_30": Decimal("14900.00"),  # <-- поменяй на свои
-    "pack_90": Decimal("39900.00"),  # <-- поменяй на свои
+    "pack_30": Decimal("6000.00"),
+    "pack_90": Decimal("13500.00"),
 }
 
 @app.on_event("startup")
