@@ -10,3 +10,5 @@ from app.models.style import Style
 from app.models.plan import Plan
 from app.models.order import Order
 from app.models.payment import Payment
+from app.models.asset import Asset
+from app.models.order_style import OrderStyle
