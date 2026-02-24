@@ -75,6 +75,8 @@ async def create_checkout(
         description=f"Video Promo SaaS order {order.id}",
         idempotence_key=str(order.id),
         metadata={"order_id": str(order.id), "user_id": str(user.id), "plan_code": plan.code},
+        customer_email=user.email,
+        vat_code=1,
     )
 
     yk_id = yk.get("id")
