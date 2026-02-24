@@ -36,13 +36,18 @@ from fastapi.exceptions import HTTPException
 from fastapi.responses import RedirectResponse
 from starlette.status import HTTP_303_SEE_OTHER
 
+from fastapi import Request, HTTPException
+from fastapi.responses import RedirectResponse
+from fastapi.exception_handlers import http_exception_handler
+
 @app.exception_handler(HTTPException)
-async def cabinet_auth_redirect(request: Request, exc: HTTPException):
-    # Редиректим только кабинет
+async def custom_http_exception_handler(request: Request, exc: HTTPException):
+    # только для кабинета: 401 -> редирект на логин
     if exc.status_code == 401 and request.url.path.startswith("/cabinet"):
-        return RedirectResponse(url="/cabinet/login", status_code=HTTP_303_SEE_OTHER)
-    # остальные HTTPException — как обычно
-    raise exc
+        return RedirectResponse(url="/cabinet/login", status_code=303)
+
+    # все остальные HTTPException отдаём стандартно (а не raise)
+    return await http_exception_handler(request, exc)
 
 YOOKASSA_SHOP_ID = os.getenv("YOOKASSA_SHOP_ID", "")
 YOOKASSA_SECRET_KEY = os.getenv("YOOKASSA_SECRET_KEY", "")
