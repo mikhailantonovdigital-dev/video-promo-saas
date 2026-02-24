@@ -1,7 +1,8 @@
-# backend/app/services/yookassa_client.py
+from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal
+
 import httpx
 
 
@@ -12,46 +13,58 @@ class YooKassaClient:
     secret_key: str
 
     async def create_payment(
-    self,
-    *,
-    amount_rub: int,
-    return_url: str,
-    description: str,
-    idempotence_key: str,
-    metadata: dict,
-    customer_email: str,
-) -> dict:
-    value = f"{Decimal(amount_rub):.2f}"
+        self,
+        *,
+        amount_rub: int,
+        return_url: str,
+        description: str,
+        idempotence_key: str,
+        metadata: dict,
+        customer_email: str,
+        vat_code: int = 1,  # 1 = без НДС (по умолчанию)
+    ) -> dict:
+        # YooKassa ожидает value строкой с 2 знаками после запятой
+        value = f"{Decimal(amount_rub):.2f}"
 
-    payload = {
-        "amount": {"value": value, "currency": "RUB"},
-        "confirmation": {"type": "redirect", "return_url": return_url},
-        "capture": True,
-        "description": description,
-        "metadata": metadata,
-        "receipt": {
-            "customer": {"email": customer_email},
-            "items": [
-                {
-                    "description": "HypePack — цифровая услуга (пакет видео)",
-                    "quantity": 1.000,
-                    "amount": {"value": value, "currency": "RUB"},
-                    "vat_code": 1,  # без НДС
-                    "payment_mode": "full_payment",
-                    "payment_subject": "service",
-                }
-            ],
-        },
-    }
+        payload = {
+            "amount": {"value": value, "currency": "RUB"},
+            "confirmation": {"type": "redirect", "return_url": return_url},
+            "capture": True,
+            "description": description,
+            "metadata": metadata,
+            # Чек (у тебя включены чеки, иначе YooKassa ругается "Receipt is missing or illegal")
+            "receipt": {
+                "customer": {"email": customer_email},
+                "items": [
+                    {
+                        "description": "HypePack — цифровая услуга (пакет видео)",
+                        "quantity": 1.000,
+                        "amount": {"value": value, "currency": "RUB"},
+                        "vat_code": vat_code,
+                        "payment_mode": "full_payment",
+                        "payment_subject": "service",
+                    }
+                ],
+            },
+        }
 
-    headers = {"Idempotence-Key": idempotence_key}
+        headers = {"Idempotence-Key": idempotence_key}
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        r = await client.post(
-            f"{self.api_base}/payments",
-            json=payload,
-            headers=headers,
-            auth=(self.shop_id, self.secret_key),
-        )
-        r.raise_for_status()
-        return r.json()
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            r = await client.post(
+                f"{self.api_base}/payments",
+                json=payload,
+                headers=headers,
+                auth=(self.shop_id, self.secret_key),  # Basic Auth
+            )
+            r.raise_for_status()
+            return r.json()
+
+    async def get_payment(self, *, payment_id: str) -> dict:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            r = await client.get(
+                f"{self.api_base}/payments/{payment_id}",
+                auth=(self.shop_id, self.secret_key),
+            )
+            r.raise_for_status()
+            return r.json()
