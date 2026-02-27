@@ -303,7 +303,7 @@ async def cabinet_order(
     generated = gen_q.scalars().all()
 
     select_images_html = ""
-    if generated:
+    if order.status == "awaiting_selection" and generated:
         items = ""
         for a in generated:
             items += f"""
@@ -335,6 +335,20 @@ async def cabinet_order(
     if not assets_html:
         assets_html = "<p class='muted'>Пока нет файлов.</p>"
 
+        step3_html = ""
+        if order.status == "awaiting_image_generation":
+            step3_html = f"""
+            <div class="card">
+              <h3 style="margin-top:0">Шаг 3 — Фотосессия (генерация)</h3>
+              <form method="post" action="/cabinet/orders/{order.id}/generate-images">
+                <label class="muted">Картинок на стиль:</label>
+                <input type="number" name="per_style" value="3" min="1" max="10" style="width:90px">
+                <button class="btn" type="submit">Сгенерировать</button>
+              </form>
+              <p class="muted">Статус станет <code>awaiting_selection</code>.</p>
+            </div>
+    """
+
     body = f"""
     <h1>Заказ</h1>
     <p class="muted">
@@ -359,17 +373,6 @@ async def cabinet_order(
         <button class="btn" type="submit">Сохранить стили</button>
       </form>
       <p class="muted">После выбора поставим статус <code>awaiting_image_generation</code>.</p>
-    </div>
-
-        step3 = f"""
-    <div class="card">
-      <h3 style="margin-top:0">Шаг 3 — Фотосессия (генерация)</h3>
-      <form method="post" action="/cabinet/orders/{order.id}/generate-images">
-        <label class="muted">Картинок на стиль:</label>
-        <input type="number" name="per_style" value="3" min="1" max="10" style="width:90px">
-        <button class="btn" type="submit">Сгенерировать</button>
-      </form>
-      <p class="muted">Статус станет <code>awaiting_selection</code>.</p>
     </div>
 
     {step3}
