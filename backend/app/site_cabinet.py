@@ -564,6 +564,67 @@ async def cabinet_generate_images(
     return RedirectResponse(f"/cabinet/orders/{order.id}", status_code=302)
 
 
+@router.post("/orders/{order_id}/video-refs")
+async def cabinet_upload_video_refs(
+    order_id: str,
+    files: list[UploadFile] = File(...),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    _ensure_enabled()
+
+    oq = await db.execute(select(Order).where(Order.id == order_id, Order.user_id == user.id))
+    order = oq.scalar_one_or_none()
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    if order.status != "awaiting_video_refs":
+        raise HTTPException(status_code=409, detail=f"Wrong order status: {order.status}")
+
+    root = _storage_root()
+    now = _now()
+
+    created_any = False
+    for f in files:
+        data = await f.read()
+        if not data:
+            continue
+        created_any = True
+
+        sha = hashlib.sha256(data).hexdigest()
+        safe_name = (f.filename or "video.mp4").replace("/", "_").replace("\\", "_")
+
+        rel = Path("uploads") / "u" / str(user.id) / "o" / str(order.id) / "video_refs" / f"{uuid.uuid4().hex}_{safe_name}"
+        abs_path = root / rel
+        abs_path.parent.mkdir(parents=True, exist_ok=True)
+        abs_path.write_bytes(data)
+
+        db.add(
+            Asset(
+                user_id=user.id,
+                order_id=order.id,
+                kind="video_ref",
+                storage_driver="local",
+                storage_key=str(rel),
+                filename=safe_name,
+                content_type=f.content_type or "application/octet-stream",
+                size_bytes=len(data),
+                sha256=sha,
+                delete_after=now + timedelta(days=FILES_TTL_DAYS),
+            )
+        )
+
+    if not created_any:
+        raise HTTPException(status_code=400, detail="All uploaded files were empty")
+
+    # пока Kling не подключен — просто переведём статус дальше
+    order.status = "kling_processing"
+    order.updated_at = now
+    await db.commit()
+
+    return RedirectResponse(f"/cabinet/orders/{order.id}", status_code=302)
+
+
 @router.post("/orders/{order_id}/select-images")
 async def cabinet_select_images(
     order_id: str,
