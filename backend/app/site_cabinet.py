@@ -33,6 +33,8 @@ from app.core.security import (
 )
 from app.models.session_token import UserSession
 from app.models.prompt_history import PromptHistory
+from app.models.video_job import VideoJob
+from app.services.video_jobs import ensure_video_jobs_for_order
 
 router = APIRouter(prefix="/cabinet", tags=["cabinet"], include_in_schema=False)
 
@@ -424,6 +426,34 @@ async def cabinet_order(
             </div>
             """
 
+    # Видео-джобы Kling
+    video_jobs_html = ""
+    if order.status in {"kling_processing", "packaging", "done", "kling_failed"}:
+        jq = await db.execute(
+            select(VideoJob)
+            .where(VideoJob.order_id == order.id, VideoJob.user_id == user.id)
+            .order_by(VideoJob.idx.asc())
+        )
+        jobs = jq.scalars().all()
+        if jobs:
+            rows = ""
+            for j in jobs:
+                rows += f"<tr><td>{j.idx + 1}</td><td><code>{j.status}</code></td><td>{j.provider_task_id or '-'}</td></tr>"
+
+            video_jobs_html = f"""
+            <div class="card">
+              <h3 style="margin-top:0">Kling: видео-джобы</h3>
+              <table style="width:100%;border-collapse:collapse">
+                <thead><tr><th align="left">#</th><th align="left">status</th><th align="left">task_id</th></tr></thead>
+                <tbody>{rows}</tbody>
+              </table>
+              <form method="post" action="/cabinet/orders/{order.id}/kling-poll" style="margin-top:10px">
+                <button class="btn" type="submit">Обновить статусы сейчас</button>
+              </form>
+              <p class="muted">Если фоновой поллер включён, статусы обновляются автоматически. Эта кнопка полезна для ручного теста.</p>
+            </div>
+            """
+
     archive_html = ""
     if order.status in {"kling_processing", "packaging", "done"} or video_ref_count > 0:
         if latest_archive and latest_archive.storage_driver == "local":
@@ -479,6 +509,7 @@ async def cabinet_order(
     {step3_html}
     {select_images_html}
     {video_refs_html}
+    {video_jobs_html}
     {archive_html}
 
     <h2>Файлы заказа</h2>
@@ -707,10 +738,42 @@ async def cabinet_upload_video_refs(
     if not created_any:
         raise HTTPException(status_code=400, detail="All uploaded files were empty")
 
-    # пока Kling не подключен — просто переведём статус дальше
+    # Переводим в Kling processing + создаём video_jobs (если ещё нет)
     order.status = "kling_processing"
     order.updated_at = now
+
+    # flush чтобы только что добавленные assets появились в SELECT внутри ensure_video_jobs
+    await db.flush()
+    try:
+        await ensure_video_jobs_for_order(db, order)
+    except Exception:
+        # если что-то не так (нет выбранных картинок и т.п.) — не валим загрузку рефов.
+        pass
     await db.commit()
+
+    return RedirectResponse(f"/cabinet/orders/{order.id}", status_code=302)
+
+
+@router.post("/orders/{order_id}/kling-poll")
+async def cabinet_kling_poll_now(
+    order_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Ручной запуск одного прохода поллера (для теста)."""
+    _ensure_enabled()
+
+    oq = await db.execute(select(Order).where(Order.id == order_id, Order.user_id == user.id))
+    order = oq.scalar_one_or_none()
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    try:
+        from app.workers.kling_poller import process_kling_jobs_once
+
+        await process_kling_jobs_once()
+    except Exception:
+        pass
 
     return RedirectResponse(f"/cabinet/orders/{order.id}", status_code=302)
 
@@ -893,7 +956,7 @@ async def cabinet_build_archive(
         "files": [],
     }
 
-    instruction_md = """# HypePack: что внутри архива\n\nВ этом ZIP: \n- input/video_refs/ — ваши видео-референсы\n- input/profile_photo/ — загруженные фото-профиля (если были)\n- manifest.json — техническая сводка по заказу\n- texts/ — шаблоны описаний и хештегов (пока заглушки)\n\nДальше мы добавим сюда итоговые result_video из Kling (motion-control) и финальные тексты.\n"""
+    instruction_md = """# HypePack: что внутри архива\n\nВ этом ZIP: \n- input/video_refs/ — ваши видео-референсы\n- input/profile_photo/ — загруженные фото-профиля (если были)\n- output/result_videos/ — итоговые видео (если уже готовы)\n- manifest.json — техническая сводка по заказу\n- texts/ — шаблоны описаний и хештегов (пока заглушки)\n\nЕсли result_videos ещё нет, просто пересоберите архив позже (когда Kling догенерит).\n"""
 
     captions_md_lines = [
         "# Тексты к видео (шаблон)",
@@ -923,6 +986,7 @@ async def cabinet_build_archive(
         _zip_add_dir(zf, "input/video_refs")
         _zip_add_dir(zf, "input/profile_photo")
         _zip_add_dir(zf, "output")
+        _zip_add_dir(zf, "output/result_videos")
         _zip_add_dir(zf, "texts")
 
         zf.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
@@ -962,6 +1026,39 @@ async def cabinet_build_archive(
             rel = _safe_rel_from_asset_key(a.storage_key)
             abs_src = (root / rel).resolve()
             arc_name = f"input/profile_photo/{idx:02d}_{_safe_filename(a.filename, 'photo.jpg')}"
+            file_entry = {
+                "kind": a.kind,
+                "asset_id": str(a.id),
+                "filename": a.filename,
+                "content_type": a.content_type,
+                "size_bytes": a.size_bytes,
+                "sha256": a.sha256,
+                "storage_driver": a.storage_driver,
+                "storage_key": a.storage_key,
+                "zip_path": arc_name,
+                "missing": False,
+            }
+            if str(abs_src).startswith(str(root)) and abs_src.exists():
+                zf.write(abs_src, arc_name)
+            else:
+                file_entry["missing"] = True
+            manifest["files"].append(file_entry)
+
+        # Файлы: итоговые result_video (если уже есть)
+        result_videos_local = [a for a in assets if a.kind == "result_video" and a.storage_driver == "local"]
+        # сортируем по idx из meta (если есть)
+        def _rv_sort(a: Asset) -> int:
+            try:
+                return int((a.meta or {}).get("idx"))
+            except Exception:
+                return 10**9
+
+        result_videos_local.sort(key=_rv_sort)
+
+        for idx, a in enumerate(result_videos_local, start=1):
+            rel = _safe_rel_from_asset_key(a.storage_key)
+            abs_src = (root / rel).resolve()
+            arc_name = f"output/result_videos/{idx:02d}_{_safe_filename(a.filename, 'video.mp4')}"
             file_entry = {
                 "kind": a.kind,
                 "asset_id": str(a.id),
