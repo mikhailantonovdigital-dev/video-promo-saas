@@ -3,12 +3,14 @@ from __future__ import annotations
 import os
 import uuid
 import hashlib
+import json
+import zipfile
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Any
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, FileResponse
 from sqlalchemy import select, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -35,6 +37,7 @@ from app.models.prompt_history import PromptHistory
 router = APIRouter(prefix="/cabinet", tags=["cabinet"], include_in_schema=False)
 
 FILES_TTL_DAYS = int(os.getenv("FILES_TTL_DAYS", "30"))
+FACE_PROFILE_TTL_DAYS = int(os.getenv("FACE_PROFILE_TTL_DAYS", "365"))
 
 # Включатель (чтобы потом можно было выключить без удаления кода)
 CABINET_ENABLED = os.getenv("CABINET_ENABLED", "1") == "1"
@@ -52,6 +55,42 @@ def _storage_root() -> Path:
     root = Path(os.getenv("LOCAL_STORAGE_DIR", "./data")).resolve()
     root.mkdir(parents=True, exist_ok=True)
     return root
+
+
+def _safe_rel_from_asset_key(storage_key: str) -> Path:
+    # storage_key в БД хранится как относительный путь (строка)
+    # Валидация нужна на случай ошибок/инъекций.
+    p = Path(str(storage_key).lstrip("/"))
+    if ".." in p.parts:
+        raise HTTPException(status_code=400, detail="Invalid storage_key")
+    return p
+
+
+def _zip_add_dir(zf: zipfile.ZipFile, dir_name: str) -> None:
+    # zip не хранит пустые папки автоматически — добавляем явную запись каталога
+    if not dir_name.endswith("/"):
+        dir_name += "/"
+    info = zipfile.ZipInfo(dir_name)
+    zf.writestr(info, b"")
+
+
+def _file_sha256(abs_path: Path) -> str:
+    h = hashlib.sha256()
+    with abs_path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _human_dt(dt: datetime | None) -> str:
+    if not dt:
+        return ""
+    return dt.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+
+def _safe_filename(name: str, default: str) -> str:
+    n = (name or "").strip() or default
+    return n.replace("/", "_").replace("\\", "_")
 
 
 def _page(title: str, body: str) -> HTMLResponse:
@@ -272,6 +311,18 @@ async def cabinet_order(
     aq = await db.execute(select(Asset).where(Asset.order_id == order.id, Asset.user_id == user.id).order_by(Asset.created_at.asc()))
     assets = aq.scalars().all()
 
+    arch_q = await db.execute(
+        select(Asset)
+        .where(
+            Asset.order_id == order.id,
+            Asset.user_id == user.id,
+            Asset.kind == "archive",
+        )
+        .order_by(Asset.created_at.desc())
+        .limit(1)
+    )
+    latest_archive = arch_q.scalar_one_or_none()
+
     sq = await db.execute(select(OrderStyle).where(OrderStyle.order_id == order.id).order_by(OrderStyle.created_at.asc()))
     selected_styles = [s.style_code for s in sq.scalars().all()]
 
@@ -373,6 +424,32 @@ async def cabinet_order(
             </div>
             """
 
+    archive_html = ""
+    if order.status in {"kling_processing", "packaging", "done"} or video_ref_count > 0:
+        if latest_archive and latest_archive.storage_driver == "local":
+            archive_html = f"""
+            <div class=\"card\">
+              <h3 style=\"margin-top:0\">Шаг 6 — Архив</h3>
+              <p class=\"muted\">Архив собран: <b>{_human_dt(latest_archive.created_at)}</b>. Файл: <code>{latest_archive.filename}</code></p>
+              <p style=\"margin-top:10px\"><a class=\"btn\" href=\"/cabinet/orders/{order.id}/archive\">Скачать ZIP</a></p>
+              <form method=\"post\" action=\"/cabinet/orders/{order.id}/build-archive\" style=\"margin-top:10px\">
+                <button class=\"btn\" type=\"submit\" style=\"background:#111827\">Собрать заново</button>
+              </form>
+              <p class=\"muted\">Сейчас архив включает: video_ref + инструкцию + manifest + шаблоны текстов (позже добавим result_video + финальные тексты).</p>
+            </div>
+            """
+        elif video_ref_count > 0:
+            archive_html = f"""
+            <div class=\"card\">
+              <h3 style=\"margin-top:0\">Шаг 6 — Архив</h3>
+              <p class=\"muted\">Можно собрать архив (ZIP) из загруженных референсов и служебных файлов.</p>
+              <form method=\"post\" action=\"/cabinet/orders/{order.id}/build-archive\">
+                <button class=\"btn\" type=\"submit\">Собрать архив</button>
+              </form>
+              <p class=\"muted\">Будет создан asset <code>archive</code> и появится кнопка скачивания.</p>
+            </div>
+            """
+
     body = f"""
     <h1>Заказ</h1>
     <p class="muted">
@@ -402,6 +479,7 @@ async def cabinet_order(
     {step3_html}
     {select_images_html}
     {video_refs_html}
+    {archive_html}
 
     <h2>Файлы заказа</h2>
     {assets_html}
@@ -451,7 +529,8 @@ async def cabinet_upload_face_profile(
             content_type=f.content_type or "application/octet-stream",
             size_bytes=len(data),
             sha256=sha,
-            delete_after=now + timedelta(days=FILES_TTL_DAYS),
+            # Лицо/фото-профиль храним 12 месяцев (можно переопределить env FACE_PROFILE_TTL_DAYS)
+            delete_after=now + timedelta(days=FACE_PROFILE_TTL_DAYS),
         )
         db.add(a)
 
@@ -692,3 +771,281 @@ async def cabinet_select_images(
     await db.commit()
 
     return RedirectResponse(f"/cabinet/orders/{order.id}", status_code=302)
+
+
+@router.post("/orders/{order_id}/build-archive")
+async def cabinet_build_archive(
+    order_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Шаг 6: собрать ZIP архив.
+    Пока в архив кладём:
+      - video_ref (загруженные референсы)
+      - (опционально) profile_photo
+      - manifest.json
+      - instructions + шаблоны текстов/хештегов
+    """
+    _ensure_enabled()
+
+    oq = await db.execute(select(Order, Plan).join(Plan, Plan.id == Order.plan_id).where(Order.id == order_id, Order.user_id == user.id))
+    row = oq.first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Order not found")
+    order, plan = row
+
+    now = _now()
+    root = _storage_root()
+
+    # Собираем данные
+    aq = await db.execute(
+        select(Asset).where(
+            Asset.order_id == order.id,
+            Asset.user_id == user.id,
+            Asset.kind.in_(["video_ref", "profile_photo", "selected_image", "generated_image", "result_video"]),
+        ).order_by(Asset.created_at.asc())
+    )
+    assets = aq.scalars().all()
+
+    video_refs = [a for a in assets if a.kind == "video_ref" and a.storage_driver == "local"]
+    if not video_refs:
+        raise HTTPException(status_code=400, detail="No video_ref uploaded yet")
+
+    sq = await db.execute(select(OrderStyle).where(OrderStyle.order_id == order.id).order_by(OrderStyle.created_at.asc()))
+    styles = [s.style_code for s in sq.scalars().all()]
+
+    # Удаляем старые архивы (и файлы), чтобы не плодить мусор
+    old_q = await db.execute(
+        select(Asset).where(
+            Asset.order_id == order.id,
+            Asset.user_id == user.id,
+            Asset.kind == "archive",
+        )
+    )
+    old_archives = old_q.scalars().all()
+    for a in old_archives:
+        if a.storage_driver == "local" and a.storage_key:
+            try:
+                abs_old = (root / _safe_rel_from_asset_key(a.storage_key)).resolve()
+                if str(abs_old).startswith(str(root)) and abs_old.exists():
+                    abs_old.unlink()
+            except Exception:
+                # если не удалось удалить файл — не падаем, просто перезапишем запись
+                pass
+        db.delete(a)
+
+    rel_zip = Path("uploads") / "u" / str(user.id) / "o" / str(order.id) / "archives" / f"{uuid.uuid4().hex}_hypepack.zip"
+    abs_zip = (root / rel_zip)
+    abs_zip.parent.mkdir(parents=True, exist_ok=True)
+
+    # manifest
+    selected_images = [a for a in assets if a.kind == "selected_image"]
+    generated_images = [a for a in assets if a.kind == "generated_image"]
+    result_videos = [a for a in assets if a.kind == "result_video"]
+
+    prompt_hashes: list[str] = []
+    for a in generated_images:
+        if isinstance(a.meta, dict) and a.meta.get("prompt_hash"):
+            prompt_hashes.append(str(a.meta.get("prompt_hash")))
+    prompt_hashes = list(dict.fromkeys([h for h in prompt_hashes if h]))
+
+    prompts: list[dict[str, Any]] = []
+    if prompt_hashes:
+        pq = await db.execute(
+            select(PromptHistory).where(
+                PromptHistory.user_id == user.id,
+                PromptHistory.prompt_hash.in_(prompt_hashes),
+            )
+        )
+        for p in pq.scalars().all():
+            prompts.append({"prompt_hash": p.prompt_hash, "prompt_text": p.prompt_text})
+
+    manifest: dict[str, Any] = {
+        "schema": "hypepack.archive.v1",
+        "generated_at": now.isoformat(),
+        "order": {
+            "id": str(order.id),
+            "status": order.status,
+            "created_at": order.created_at.isoformat() if order.created_at else None,
+            "updated_at": order.updated_at.isoformat() if order.updated_at else None,
+            "plan": {"code": plan.code, "title": plan.title, "videos_count": plan.videos_count, "images_count": plan.images_count},
+            "styles": styles,
+        },
+        "includes": {
+            "video_refs": len(video_refs),
+            "profile_photos": len([a for a in assets if a.kind == "profile_photo"]),
+            "generated_images": len(generated_images),
+            "selected_images": len(selected_images),
+            "result_videos": len(result_videos),
+        },
+        "selected_images": [
+            {
+                "asset_id": str(a.id),
+                "filename": a.filename,
+                "storage_driver": a.storage_driver,
+                "storage_key": a.storage_key,
+                "meta": a.meta,
+            }
+            for a in selected_images
+        ],
+        "prompts": prompts,
+        "files": [],
+    }
+
+    instruction_md = """# HypePack: что внутри архива\n\nВ этом ZIP: \n- input/video_refs/ — ваши видео-референсы\n- input/profile_photo/ — загруженные фото-профиля (если были)\n- manifest.json — техническая сводка по заказу\n- texts/ — шаблоны описаний и хештегов (пока заглушки)\n\nДальше мы добавим сюда итоговые result_video из Kling (motion-control) и финальные тексты.\n"""
+
+    captions_md_lines = [
+        "# Тексты к видео (шаблон)",
+        "",
+        "Заполните под свой трек: название, CTA, ссылки, призыв подписаться.",
+        "",
+    ]
+    for i, a in enumerate(video_refs, start=1):
+        captions_md_lines += [
+            f"## Видео {i}",
+            f"Файл: {a.filename}",
+            "",
+            "Описание:",
+            "- ",
+            "",
+            "Хештеги:",
+            "- ",
+            "",
+        ]
+    captions_md = "\n".join(captions_md_lines)
+
+    hashtags_txt = """# хештеги (шаблон)\n# добавьте жанр/настроение/референсы\n# пример: #music #newmusic #indie #твойжанр\n"""
+
+    # Сборка ZIP
+    with zipfile.ZipFile(abs_zip, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        _zip_add_dir(zf, "input")
+        _zip_add_dir(zf, "input/video_refs")
+        _zip_add_dir(zf, "input/profile_photo")
+        _zip_add_dir(zf, "output")
+        _zip_add_dir(zf, "texts")
+
+        zf.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
+        zf.writestr("INSTRUCTION.md", instruction_md)
+        zf.writestr("texts/captions.md", captions_md)
+        zf.writestr("texts/hashtags.txt", hashtags_txt)
+
+        # Файлы: видео-референсы
+        for idx, a in enumerate(video_refs, start=1):
+            rel = _safe_rel_from_asset_key(a.storage_key)
+            abs_src = (root / rel).resolve()
+            arc_name = f"input/video_refs/{idx:02d}_{_safe_filename(a.filename, 'video.mp4')}"
+
+            file_entry: dict[str, Any] = {
+                "kind": a.kind,
+                "asset_id": str(a.id),
+                "filename": a.filename,
+                "content_type": a.content_type,
+                "size_bytes": a.size_bytes,
+                "sha256": a.sha256,
+                "storage_driver": a.storage_driver,
+                "storage_key": a.storage_key,
+                "zip_path": arc_name,
+                "missing": False,
+            }
+
+            if str(abs_src).startswith(str(root)) and abs_src.exists():
+                zf.write(abs_src, arc_name)
+            else:
+                file_entry["missing"] = True
+
+            manifest["files"].append(file_entry)
+
+        # Файлы: фото-профиль (если local)
+        profile_photos = [a for a in assets if a.kind == "profile_photo" and a.storage_driver == "local"]
+        for idx, a in enumerate(profile_photos, start=1):
+            rel = _safe_rel_from_asset_key(a.storage_key)
+            abs_src = (root / rel).resolve()
+            arc_name = f"input/profile_photo/{idx:02d}_{_safe_filename(a.filename, 'photo.jpg')}"
+            file_entry = {
+                "kind": a.kind,
+                "asset_id": str(a.id),
+                "filename": a.filename,
+                "content_type": a.content_type,
+                "size_bytes": a.size_bytes,
+                "sha256": a.sha256,
+                "storage_driver": a.storage_driver,
+                "storage_key": a.storage_key,
+                "zip_path": arc_name,
+                "missing": False,
+            }
+            if str(abs_src).startswith(str(root)) and abs_src.exists():
+                zf.write(abs_src, arc_name)
+            else:
+                file_entry["missing"] = True
+            manifest["files"].append(file_entry)
+
+        # Перезаписываем manifest уже с files[]
+        zf.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
+
+    # Создаём asset=archive
+    zip_size = abs_zip.stat().st_size if abs_zip.exists() else None
+    zip_sha = _file_sha256(abs_zip) if abs_zip.exists() else None
+    archive_asset = Asset(
+        user_id=user.id,
+        order_id=order.id,
+        kind="archive",
+        storage_driver="local",
+        storage_key=str(rel_zip),
+        filename=f"HypePack_{order.id}.zip",
+        content_type="application/zip",
+        size_bytes=zip_size,
+        sha256=zip_sha,
+        delete_after=now + timedelta(days=FILES_TTL_DAYS),
+        meta={"schema": manifest.get("schema"), "video_refs": len(video_refs), "styles": styles},
+    )
+    db.add(archive_asset)
+
+    # статус не меняем (пока Kling заглушка). Позже сделаем: kling_processing -> awaiting_packaging -> done
+    order.updated_at = now
+    await db.commit()
+
+    return RedirectResponse(f"/cabinet/orders/{order.id}", status_code=302)
+
+
+@router.get("/orders/{order_id}/archive")
+async def cabinet_download_archive(
+    order_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    _ensure_enabled()
+
+    oq = await db.execute(select(Order).where(Order.id == order_id, Order.user_id == user.id))
+    order = oq.scalar_one_or_none()
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    arch_q = await db.execute(
+        select(Asset)
+        .where(
+            Asset.order_id == order.id,
+            Asset.user_id == user.id,
+            Asset.kind == "archive",
+        )
+        .order_by(Asset.created_at.desc())
+        .limit(1)
+    )
+    archive = arch_q.scalar_one_or_none()
+    if not archive:
+        raise HTTPException(status_code=404, detail="Archive not found")
+    if archive.storage_driver != "local":
+        raise HTTPException(status_code=409, detail="Archive storage_driver is not local")
+
+    root = _storage_root()
+    rel = _safe_rel_from_asset_key(archive.storage_key)
+    abs_path = (root / rel).resolve()
+    if not str(abs_path).startswith(str(root)) or not abs_path.exists():
+        raise HTTPException(status_code=404, detail="Archive file missing")
+
+    return FileResponse(
+        path=str(abs_path),
+        media_type="application/zip",
+        filename=archive.filename or "hypepack.zip",
+        headers={"Cache-Control": "no-store"},
+    )
