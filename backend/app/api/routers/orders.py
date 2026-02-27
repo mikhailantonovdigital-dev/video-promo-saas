@@ -21,6 +21,7 @@ from app.models.order_style import OrderStyle
 router = APIRouter(prefix="/orders", tags=["orders"])
 
 FILES_TTL_DAYS = int(os.getenv("FILES_TTL_DAYS", "30"))
+FACE_PROFILE_TTL_DAYS = int(os.getenv("FACE_PROFILE_TTL_DAYS", "365"))
 
 
 def _now() -> datetime:
@@ -167,7 +168,8 @@ async def upload_face_profile(
             content_type=f.content_type or "application/octet-stream",
             size_bytes=len(data),
             sha256=sha,
-            delete_after=now + timedelta(days=FILES_TTL_DAYS),
+            # Лицо/фото-профиль храним 12 месяцев (можно переопределить env FACE_PROFILE_TTL_DAYS)
+            delete_after=now + timedelta(days=FACE_PROFILE_TTL_DAYS),
         )
         db.add(a)
         await db.flush()
