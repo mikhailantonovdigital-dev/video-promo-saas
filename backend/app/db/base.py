@@ -13,3 +13,4 @@ from app.models.payment import Payment
 from app.models.asset import Asset
 from app.models.order_style import OrderStyle
 from app.models.prompt_history import PromptHistory
+from app.models.video_job import VideoJob  # noqa: F401
