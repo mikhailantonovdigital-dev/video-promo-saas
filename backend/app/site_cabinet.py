@@ -349,6 +349,19 @@ async def cabinet_order(
         </div>
         """
 
+    video_refs_html = ""
+    if order.status == "awaiting_video_refs":
+        video_refs_html = f"""
+        <div class="card">
+          <h3 style="margin-top:0">Шаг 5 — Видео-референсы (загрузка)</h3>
+          <form method="post" action="/cabinet/orders/{order.id}/video-refs" enctype="multipart/form-data">
+            <input type="file" name="files" multiple required accept="video/*">
+            <button class="btn" type="submit">Загрузить видео</button>
+          </form>
+          <p class="muted">После загрузки поставим статус <code>kling_processing</code> (пока заглушка).</p>
+        </div>
+        """
+
     body = f"""
     <h1>Заказ</h1>
     <p class="muted">
@@ -377,6 +390,7 @@ async def cabinet_order(
 
     {step3_html}
     {select_images_html}
+    {video_refs_html}
 
     <h2>Файлы заказа</h2>
     {assets_html}
