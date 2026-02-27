@@ -30,6 +30,7 @@ from app.core.security import (
     verify_password,
 )
 from app.models.session_token import UserSession
+from app.models.prompt_history import PromptHistory
 
 router = APIRouter(prefix="/cabinet", tags=["cabinet"], include_in_schema=False)
 
@@ -41,6 +42,10 @@ CABINET_ENABLED = os.getenv("CABINET_ENABLED", "1") == "1"
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+    
+
+def _sha256(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def _storage_root() -> Path:
@@ -287,6 +292,37 @@ async def cabinet_order(
         </label>
         """
 
+    # список картинок для выбора
+    gen_q = await db.execute(
+        select(Asset).where(
+            Asset.order_id == order.id,
+            Asset.user_id == user.id,
+            Asset.kind == "generated_image",
+        ).order_by(Asset.created_at.asc())
+    )
+    generated = gen_q.scalars().all()
+
+    select_images_html = ""
+    if generated:
+        items = ""
+        for a in generated:
+            items += f"""
+            <label style="display:block;margin:6px 0">
+              <input type="checkbox" name="selected_asset_ids" value="{a.id}">
+              {a.filename} <span class="muted">({(a.meta or {}).get("style","")})</span>
+            </label>
+            """
+        select_images_html = f"""
+        <div class="card">
+          <h3 style="margin-top:0">Шаг 4 — Выбор картинок</h3>
+          <form method="post" action="/cabinet/orders/{order.id}/select-images">
+            {items}
+            <button class="btn" type="submit">Подтвердить выбор</button>
+          </form>
+          <p class="muted">Статус станет <code>awaiting_video_refs</code>.</p>
+        </div>
+        """
+
     assets_html = ""
     for a in assets:
         assets_html += f"""
@@ -324,6 +360,20 @@ async def cabinet_order(
       </form>
       <p class="muted">После выбора поставим статус <code>awaiting_image_generation</code>.</p>
     </div>
+
+        step3 = f"""
+    <div class="card">
+      <h3 style="margin-top:0">Шаг 3 — Фотосессия (генерация)</h3>
+      <form method="post" action="/cabinet/orders/{order.id}/generate-images">
+        <label class="muted">Картинок на стиль:</label>
+        <input type="number" name="per_style" value="3" min="1" max="10" style="width:90px">
+        <button class="btn" type="submit">Сгенерировать</button>
+      </form>
+      <p class="muted">Статус станет <code>awaiting_selection</code>.</p>
+    </div>
+
+    {step3}
+    {select_images_html}
 
     <h2>Файлы заказа</h2>
     {assets_html}
@@ -417,6 +467,139 @@ async def cabinet_select_styles(
 
     order.status = "awaiting_image_generation"
     order.updated_at = _now()
+    await db.commit()
+
+    return RedirectResponse(f"/cabinet/orders/{order.id}", status_code=302)
+
+@router.post("/orders/{order_id}/generate-images")
+async def cabinet_generate_images(
+    order_id: str,
+    per_style: int = Form(3),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    _ensure_enabled()
+
+    per_style = max(1, min(int(per_style or 3), 10))
+
+    oq = await db.execute(select(Order).where(Order.id == order_id, Order.user_id == user.id))
+    order = oq.scalar_one_or_none()
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    if order.status != "awaiting_image_generation":
+        raise HTTPException(status_code=409, detail=f"Wrong order status: {order.status}")
+
+    sq = await db.execute(select(OrderStyle).where(OrderStyle.order_id == order.id))
+    style_codes = [s.style_code for s in sq.scalars().all()]
+    if not style_codes:
+        raise HTTPException(status_code=400, detail="No styles selected")
+
+    now = _now()
+
+    # создаём заглушки картинок: generated_image
+    for style_code in style_codes:
+        for i in range(per_style):
+            base_prompt = f"HypePack photopack. style={style_code}. shot={i+1}."
+            prompt_text = base_prompt + f" variation={uuid.uuid4().hex[:10]}"
+            prompt_hash = _sha256(prompt_text)
+
+            # гарантируем уникальность для user (повторные заказы не повторяют промпты)
+            tries = 0
+            while True:
+                ex = await db.execute(
+                    select(PromptHistory.id).where(
+                        PromptHistory.user_id == user.id,
+                        PromptHistory.prompt_hash == prompt_hash,
+                    )
+                )
+                if not ex.scalar_one_or_none():
+                    break
+                tries += 1
+                prompt_text = base_prompt + f" variation={uuid.uuid4().hex}"
+                prompt_hash = _sha256(prompt_text)
+                if tries > 5:
+                    break
+
+            db.add(PromptHistory(user_id=user.id, prompt_hash=prompt_hash, prompt_text=prompt_text))
+
+            fake_key = f"placeholder://img/u/{user.id}/o/{order.id}/{style_code}/{uuid.uuid4().hex}"
+            db.add(
+                Asset(
+                    user_id=user.id,
+                    order_id=order.id,
+                    kind="generated_image",
+                    storage_driver="placeholder",
+                    storage_key=fake_key,
+                    filename=f"{style_code}_{i+1}.png",
+                    content_type="image/png",
+                    size_bytes=None,
+                    sha256=None,
+                    delete_after=now + timedelta(days=FILES_TTL_DAYS),
+                    meta={"style": style_code, "prompt_hash": prompt_hash},
+                )
+            )
+
+    order.status = "awaiting_selection"
+    order.updated_at = now
+    await db.commit()
+
+    return RedirectResponse(f"/cabinet/orders/{order.id}", status_code=302)
+
+
+@router.post("/orders/{order_id}/select-images")
+async def cabinet_select_images(
+    order_id: str,
+    selected_asset_ids: list[str] = Form([]),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    _ensure_enabled()
+
+    oq = await db.execute(select(Order).where(Order.id == order_id, Order.user_id == user.id))
+    order = oq.scalar_one_or_none()
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    if order.status != "awaiting_selection":
+        raise HTTPException(status_code=409, detail=f"Wrong order status: {order.status}")
+
+    if not selected_asset_ids:
+        raise HTTPException(status_code=400, detail="Choose at least one generated image")
+
+    # валидируем, что эти assets принадлежат заказу и kind=generated_image
+    aq = await db.execute(
+        select(Asset).where(
+            Asset.order_id == order.id,
+            Asset.user_id == user.id,
+            Asset.kind == "generated_image",
+            Asset.id.in_(selected_asset_ids),
+        )
+    )
+    items = aq.scalars().all()
+    if len(items) != len(selected_asset_ids):
+        raise HTTPException(status_code=400, detail="Some selected assets are invalid")
+
+    now = _now()
+    for src in items:
+        db.add(
+            Asset(
+                user_id=user.id,
+                order_id=order.id,
+                kind="selected_image",
+                storage_driver=src.storage_driver,
+                storage_key=src.storage_key,
+                filename=src.filename,
+                content_type=src.content_type,
+                size_bytes=src.size_bytes,
+                sha256=src.sha256,
+                delete_after=now + timedelta(days=FILES_TTL_DAYS),
+                meta=src.meta,
+            )
+        )
+
+    order.status = "awaiting_video_refs"
+    order.updated_at = now
     await db.commit()
 
     return RedirectResponse(f"/cabinet/orders/{order.id}", status_code=302)
