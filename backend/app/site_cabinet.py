@@ -349,18 +349,29 @@ async def cabinet_order(
         </div>
         """
 
+    # Посчитать сколько уже загружено video_ref
+    video_ref_count = sum(1 for a in assets if a.kind == "video_ref")
+
     video_refs_html = ""
-    if order.status == "awaiting_video_refs":
-        video_refs_html = f"""
-        <div class="card">
-          <h3 style="margin-top:0">Шаг 5 — Видео-референсы (загрузка)</h3>
-          <form method="post" action="/cabinet/orders/{order.id}/video-refs" enctype="multipart/form-data">
-            <input type="file" name="files" multiple required accept="video/*">
-            <button class="btn" type="submit">Загрузить видео</button>
-          </form>
-          <p class="muted">После загрузки поставим статус <code>kling_processing</code> (пока заглушка).</p>
-        </div>
-        """
+    if order.status in {"awaiting_video_refs", "kling_processing", "packaging", "done"}:
+        if order.status == "awaiting_video_refs":
+            video_refs_html = f"""
+            <div class="card">
+              <h3 style="margin-top:0">Шаг 5 — Видео-референсы (загрузка)</h3>
+              <form method="post" action="/cabinet/orders/{order.id}/video-refs" enctype="multipart/form-data">
+                <input type="file" name="files" multiple required accept="video/*">
+                <button class="btn" type="submit">Загрузить видео</button>
+              </form>
+              <p class="muted">После загрузки поставим статус <code>kling_processing</code> (пока заглушка).</p>
+            </div>
+            """
+        else:
+            video_refs_html = f"""
+            <div class="card">
+              <h3 style="margin-top:0">Шаг 5 — Видео-референсы</h3>
+              <p class="muted">Загружено видео: <b>{video_ref_count}</b>. Текущий статус: <code>{order.status}</code>.</p>
+            </div>
+            """
 
     body = f"""
     <h1>Заказ</h1>
