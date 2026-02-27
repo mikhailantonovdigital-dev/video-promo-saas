@@ -12,3 +12,4 @@ from app.models.order import Order
 from app.models.payment import Payment
 from app.models.asset import Asset
 from app.models.order_style import OrderStyle
+from app.models.prompt_history import PromptHistory
