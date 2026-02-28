@@ -35,21 +35,11 @@ from app.models.session_token import UserSession
 from app.models.prompt_history import PromptHistory
 from app.models.video_job import VideoJob
 from app.services.video_jobs import ensure_video_jobs_for_order
-from app.services.media_info import probe_duration_seconds
-from app.services.video_transcode import transcode_for_kling
 
 router = APIRouter(prefix="/cabinet", tags=["cabinet"], include_in_schema=False)
 
 FILES_TTL_DAYS = int(os.getenv("FILES_TTL_DAYS", "30"))
-VIDEO_REF_MAX_UPLOAD_MB = int(os.getenv("VIDEO_REF_MAX_UPLOAD_MB", "1024"))  # сколько принимать от клиента (1 ГБ по умолчанию)
-VIDEO_REF_MAX_UPLOAD_BYTES = VIDEO_REF_MAX_UPLOAD_MB * 1024 * 1024
-UPLOAD_CHUNK_BYTES = int(os.getenv("UPLOAD_CHUNK_BYTES", str(1024 * 1024)))  # 1 МБ
 FACE_PROFILE_TTL_DAYS = int(os.getenv("FACE_PROFILE_TTL_DAYS", "365"))
-
-# Ограничения Kling Motion Control (реф-видео)
-# По документации Kling: video_url (mp4/mov) <= 100MB, длительность зависит от character_orientation.
-KLING_MAX_REF_SIZE_MB = int(os.getenv("KLING_MAX_REF_SIZE_MB", "100"))
-VIDEO_REF_MAX_UPLOAD_MB = int(os.getenv("VIDEO_REF_MAX_UPLOAD_MB", "1024"))  # сколько вообще принимаем на вход (MVP)
 
 # Включатель (чтобы потом можно было выключить без удаления кода)
 CABINET_ENABLED = os.getenv("CABINET_ENABLED", "1") == "1"
@@ -418,6 +408,7 @@ async def cabinet_order(
     video_refs_html = ""
     if order.status in {"awaiting_video_refs", "kling_processing", "packaging", "done"}:
         if order.status == "awaiting_video_refs":
+            max_mb = int(os.getenv("VIDEO_REF_MAX_UPLOAD_MB", "1024"))
             video_refs_html = f"""
             <div class="card">
               <h3 style="margin-top:0">Шаг 5 — Видео-референсы (загрузка)</h3>
@@ -425,14 +416,12 @@ async def cabinet_order(
                 <input type="file" name="files" multiple required accept="video/*">
                 <button class="btn" type="submit">Загрузить видео</button>
               </form>
-              <p class="muted" style="margin:10px 0 0 0">
-                Требования Kling: видео до <b>30 сек</b>, форматы <b>.mp4/.mov</b>, результат должен быть &lt;= <b>{KLING_MAX_REF_SIZE_MB}MB</b>.
-                Если файл тяжелее, мы автоматически сожмём его на сервере.
+              <p class="muted">
+                Требования Kling: видео до <b>30 сек</b> и итоговый файл до <b>100MB</b>.
+                Если загрузишь тяжелее (например iPhone MOV) — сервис автоматически сожмёт до лимита перед отправкой в Kling.
+                Максимальный размер загрузки сейчас: <b>{max_mb}MB</b>.
               </p>
-              <p class="muted" style="margin:6px 0 0 0">
-                Максимальный размер загрузки: <b>{VIDEO_REF_MAX_UPLOAD_MB}MB</b>.
-              </p>
-              <p class="muted">После загрузки мы при необходимости сожмём видео и поставим статус <code>kling_processing</code>.</p>
+              <p class="muted">После загрузки поставим статус <code>kling_processing</code> и создадим video_jobs.</p>
             </div>
             """
         else:
@@ -722,15 +711,14 @@ async def cabinet_upload_video_refs(
     root = _storage_root()
     now = _now()
 
-    # лимиты (можешь оставить как у тебя уже сделано)
     max_mb = int(os.getenv("VIDEO_REF_MAX_UPLOAD_MB", "1024"))
     max_bytes = max_mb * 1024 * 1024
     chunk_bytes = int(os.getenv("UPLOAD_CHUNK_BYTES", str(1024 * 1024)))  # 1MB
 
     created_any = False
-
     for f in files:
         safe_name = (f.filename or "video.mp4").replace("/", "_").replace("\\", "_")
+
         rel = (
             Path("uploads")
             / "u"
@@ -745,14 +733,12 @@ async def cabinet_upload_video_refs(
 
         hasher = hashlib.sha256()
         size = 0
-
         try:
             with abs_path.open("wb") as out:
                 while True:
                     chunk = await f.read(chunk_bytes)
                     if not chunk:
                         break
-
                     size += len(chunk)
                     if size > max_bytes:
                         try:
@@ -763,7 +749,6 @@ async def cabinet_upload_video_refs(
                             except Exception:
                                 pass
                         raise HTTPException(status_code=413, detail=f"Файл слишком большой. Максимум: {max_mb} MB")
-
                     hasher.update(chunk)
                     out.write(chunk)
         finally:
@@ -781,6 +766,8 @@ async def cabinet_upload_video_refs(
 
         created_any = True
 
+        sha = hasher.hexdigest()
+
         db.add(
             Asset(
                 user_id=user.id,
@@ -791,7 +778,7 @@ async def cabinet_upload_video_refs(
                 filename=safe_name,
                 content_type=f.content_type or "application/octet-stream",
                 size_bytes=size,
-                sha256=hasher.hexdigest(),
+                sha256=sha,
                 delete_after=now + timedelta(days=FILES_TTL_DAYS),
             )
         )
@@ -799,9 +786,17 @@ async def cabinet_upload_video_refs(
     if not created_any:
         raise HTTPException(status_code=400, detail="All uploaded files were empty")
 
-    # дальше как у тебя: перевод статуса
+    # Переводим в Kling processing + создаём video_jobs (если ещё нет)
     order.status = "kling_processing"
     order.updated_at = now
+
+    # flush чтобы только что добавленные assets появились в SELECT внутри ensure_video_jobs
+    await db.flush()
+    try:
+        await ensure_video_jobs_for_order(db, order)
+    except Exception:
+        # если что-то не так (нет выбранных картинок и т.п.) — не валим загрузку рефов.
+        pass
     await db.commit()
 
     return RedirectResponse(f"/cabinet/orders/{order.id}", status_code=302)
