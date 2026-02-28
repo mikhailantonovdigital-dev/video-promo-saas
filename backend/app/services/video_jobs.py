@@ -56,9 +56,10 @@ async def ensure_video_jobs_for_order(db: AsyncSession, order: Order) -> int:
     )
     assets = aq.scalars().all()
 
-    selected_images = [a for a in assets if a.kind == "selected_image"]
+    # Для Kling нужен реальный доступный URL, поэтому используем только local assets.
+    selected_images = [a for a in assets if a.kind == "selected_image" and a.storage_driver == "local"]
     if not selected_images:
-        selected_images = [a for a in assets if a.kind == "profile_photo"]
+        selected_images = [a for a in assets if a.kind == "profile_photo" and a.storage_driver == "local"]
 
     vq = await db.execute(
         select(Asset).where(
