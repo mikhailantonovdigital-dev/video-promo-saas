@@ -9,14 +9,14 @@ def _run(cmd: list[str]) -> None:
     subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
 
-def _calc_target_video_bitrate_kbps(duration_s: float, target_size_mb: int) -> int:
-    # Target total bits per second to fit the desired size.
-    # We strip audio (-an), so budget is for video only.
+def _calc_target_video_bitrate_kbps(duration_s: float, target_size_mb: int, audio_kbps: int = 128) -> int:
+    # Budget for TOTAL size, then subtract audio bitrate.
     target_bytes = target_size_mb * 1024 * 1024
-    bps = (target_bytes * 8) / max(duration_s, 1e-6)
-    kbps = int(bps / 1000)
-    # sane bounds
-    return max(800, min(kbps, 30000))
+    total_bps = (target_bytes * 8) / max(duration_s, 1e-6)
+    total_kbps = int(total_bps / 1000)
+
+    video_kbps = total_kbps - audio_kbps - 128  # небольшой запас на контейнер/служебные данные
+    return max(800, min(video_kbps, 30000))
 
 
 def transcode_for_kling(
@@ -43,7 +43,7 @@ def transcode_for_kling(
     # Scale expression: if height > max_height -> scale down, else keep original.
     vf = f"scale='if(gt(ih,{max_height}),-2,iw)':'if(gt(ih,{max_height}),{max_height},ih)'"
 
-    bitrate_kbps = _calc_target_video_bitrate_kbps(duration_s, target_size_mb)
+    bitrate_kbps = _calc_target_video_bitrate_kbps(duration_s, target_size_mb, audio_kbps=128)
 
     cmd = [
         "ffmpeg",
@@ -70,7 +70,9 @@ def transcode_for_kling(
         "yuv420p",
         "-movflags",
         "+faststart",
-        "-an",
+        "-c:a", "aac",
+        "-b:a", "128k",
+        "-ac", "2",
         str(output_path),
     ]
     _run(cmd)
