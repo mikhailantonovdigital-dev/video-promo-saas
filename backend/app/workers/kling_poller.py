@@ -267,12 +267,34 @@ async def _maybe_update_order_status(db: AsyncSession, order_id) -> None:
         return
 
     terminal = {"succeeded", "failed"}
-    if all(s in terminal for s in statuses):
-        if any(s == "failed" for s in statuses):
-            order.status = "kling_failed"
-        else:
-            order.status = "packaging"
+    if not all(s in terminal for s in statuses):
+        return
+
+    if any(s == "failed" for s in statuses):
+        order.status = "kling_failed"
         order.updated_at = now
+        return
+
+    # all succeeded
+    if order.status == "done":
+        return
+
+    order.status = "packaging"
+    order.updated_at = now
+
+    # Автосборка финального архива + перевод заказа в done.
+    try:
+        from app.services.archive_builder import build_order_archive
+
+        # Для manifest считаем, что заказ уже готов.
+        order.status = "done"
+        order.updated_at = _now()
+        await build_order_archive(db, order=order, user_id=order.user_id, force_rebuild=True)
+    except Exception as e:
+        # Оставляем packaging, чтобы можно было вручную пересобрать/починить.
+        # Ошибку пишем в последний job ниже по стеку.
+        order.status = "packaging"
+        order.updated_at = _now()
 
 
 async def process_kling_jobs_once() -> int:
