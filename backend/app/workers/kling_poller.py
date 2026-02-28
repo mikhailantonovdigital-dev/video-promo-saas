@@ -17,6 +17,7 @@ from app.models.order import Order
 from app.models.video_job import VideoJob
 from app.services.kling_client import KlingClient, extract_task_id, extract_task_status, extract_video_url
 from app.services.public_assets import sign_asset_url
+from app.services.video_ref_prepare import ensure_prepared_video_ref
 from app.services.storage import storage_root, safe_join_storage
 
 
@@ -43,24 +44,35 @@ BATCH_SIZE = _env_int("KLING_POLL_BATCH_SIZE", 2)
 MAX_ATTEMPTS = _env_int("KLING_MAX_ATTEMPTS", 5)
 
 
-async def _download_file(url: str, *, timeout: float = 120.0) -> bytes:
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        r = await client.get(url)
-        r.raise_for_status()
-        return r.content
+async def _download_to_path(url: str, dst: Path, *, timeout: float = 180.0) -> int:
+    """Stream-download URL into dst. Returns bytes written."""
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    size = 0
+    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+        async with client.stream("GET", url) as r:
+            r.raise_for_status()
+            with dst.open("wb") as f:
+                async for chunk in r.aiter_bytes():
+                    if not chunk:
+                        continue
+                    f.write(chunk)
+                    size += len(chunk)
+    return size
 
 
-async def _store_result_video(db: AsyncSession, *, job: VideoJob, video_bytes: bytes, content_type: str = "video/mp4") -> Asset:
+async def _store_result_video_from_url(
+    db: AsyncSession, *, job: VideoJob, video_url: str, content_type: str = "video/mp4"
+) -> Asset:
     now = _now()
     ttl_days = _env_int("FILES_TTL_DAYS", 30)
 
-    sha = hashlib.sha256(video_bytes).hexdigest()
     filename = f"video_{job.idx + 1:02d}.mp4"
 
     rel = Path("uploads") / "u" / str(job.user_id) / "o" / str(job.order_id) / "result_videos" / f"{job.id.hex}.mp4"
     abs_path = storage_root() / rel
     abs_path.parent.mkdir(parents=True, exist_ok=True)
-    abs_path.write_bytes(video_bytes)
+    size = await _download_to_path(video_url, abs_path, timeout=_env_float("KLING_DOWNLOAD_TIMEOUT", 240.0))
+    sha = hashlib.sha256(abs_path.read_bytes()).hexdigest()
 
     asset = Asset(
         user_id=job.user_id,
@@ -70,7 +82,7 @@ async def _store_result_video(db: AsyncSession, *, job: VideoJob, video_bytes: b
         storage_key=str(rel),
         filename=filename,
         content_type=content_type,
-        size_bytes=len(video_bytes),
+        size_bytes=int(size),
         sha256=sha,
         delete_after=now + timedelta(days=ttl_days),
         meta={"job_id": str(job.id), "idx": job.idx},
@@ -95,8 +107,7 @@ def _kling_mode() -> str:
 
 
 def _kling_character_orientation() -> str:
-    # По доке Motion Control: при character_orientation="video" допустимы видео до 30 сек.
-    # Для HypePack это более ожидаемое поведение, поэтому дефолт — "video".
+    # По оф. доке: video -> ref<=30s, image -> ref<=10s.
     return os.getenv("KLING_CHARACTER_ORIENTATION", "video")
 
 
@@ -122,9 +133,33 @@ async def _submit_job(db: AsyncSession, job: VideoJob) -> None:
         job.updated_at = now
         return
 
-    # Делаем публичные URL для Kling (на ограниченное время)
-    image_url = sign_asset_url(job.image_asset_id, expires_in_seconds=6 * 3600)
-    video_url = sign_asset_url(job.video_ref_asset_id, expires_in_seconds=6 * 3600)
+    # Подтягиваем assets и готовим input под требования Kling.
+    img_asset = await db.get(Asset, job.image_asset_id)
+    if not img_asset or img_asset.storage_driver != "local":
+        # generated/selected image у нас может быть placeholder — используем profile_photo.
+        pq = await db.execute(
+            select(Asset)
+            .where(Asset.order_id == job.order_id)
+            .where(Asset.user_id == job.user_id)
+            .where(Asset.kind == "profile_photo")
+            .where(Asset.storage_driver == "local")
+            .order_by(Asset.created_at.desc())
+            .limit(1)
+        )
+        img_asset = pq.scalar_one_or_none()
+
+    if not img_asset:
+        raise RuntimeError("No local image found for Kling (need profile_photo)")
+
+    vid_asset = await db.get(Asset, job.video_ref_asset_id)
+    if not vid_asset or vid_asset.storage_driver != "local":
+        raise RuntimeError("video_ref asset missing or not local")
+
+    prepared_vid = await ensure_prepared_video_ref(db, src=vid_asset)
+
+    expires = _env_int("PUBLIC_ASSET_URL_TTL_SECONDS", 6 * 3600)
+    image_url = sign_asset_url(img_asset.id, expires_in_seconds=expires)
+    video_url = sign_asset_url(prepared_vid.id, expires_in_seconds=expires)
 
     # Промпт подтянем из prompt_history через manifest позже; здесь достаточно хранить hash,
     # но для API нужен prompt. Достаём prompt_text по хэшу из prompt_history в момент отправки.
@@ -195,8 +230,7 @@ async def _poll_job(db: AsyncSession, job: VideoJob) -> None:
         if not video_url:
             raise RuntimeError(f"Kling task succeeded but no video url found. Response: {resp}")
 
-        video_bytes = await _download_file(video_url, timeout=_env_float("KLING_DOWNLOAD_TIMEOUT", 180.0))
-        asset = await _store_result_video(db, job=job, video_bytes=video_bytes)
+        asset = await _store_result_video_from_url(db, job=job, video_url=video_url)
 
         job.result_asset_id = asset.id
         job.status = "succeeded"
