@@ -95,7 +95,9 @@ def _kling_mode() -> str:
 
 
 def _kling_character_orientation() -> str:
-    return os.getenv("KLING_CHARACTER_ORIENTATION", "image")
+    # По доке Motion Control: при character_orientation="video" допустимы видео до 30 сек.
+    # Для HypePack это более ожидаемое поведение, поэтому дефолт — "video".
+    return os.getenv("KLING_CHARACTER_ORIENTATION", "video")
 
 
 def _kling_keep_original_sound() -> str:
