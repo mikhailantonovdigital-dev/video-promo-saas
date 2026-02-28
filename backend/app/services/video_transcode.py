@@ -1,88 +1,85 @@
 from __future__ import annotations
 
+import os
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Tuple
+from typing import Optional
+
+from app.services.ffmpeg_tools import get_ffmpeg_exe, probe_duration_seconds
 
 
-def _ffmpeg_exe() -> str:
-    """Return path to ffmpeg binary.
+@dataclass
+class TranscodeResult:
+    output_path: Path
+    duration_seconds: float
+    output_size_bytes: int
+    video_bitrate_kbps: int
+    audio_bitrate_kbps: int
 
-    Prefer bundled binary from imageio-ffmpeg to avoid OS-level installs on Render.
-    """
+
+def _env_int(name: str, default: int) -> int:
     try:
-        from imageio_ffmpeg import get_ffmpeg_exe
-
-        return get_ffmpeg_exe()
+        return int(os.getenv(name, str(default)))
     except Exception:
-        return "ffmpeg"
-
-
-def _run(cmd: list[str]) -> None:
-    p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    if p.returncode != 0:
-        tail = (p.stderr or "")[-2000:]
-        raise RuntimeError(f"ffmpeg failed (code={p.returncode}). Tail:\n{tail}")
+        return default
 
 
 def _calc_target_video_bitrate_kbps(duration_s: float, target_size_mb: int, audio_kbps: int = 128) -> int:
-    """Compute target VIDEO bitrate to fit total file size budget.
-
-    We reserve audio_kbps for audio track and keep some overhead for MP4 container.
-    """
+    """Compute a target *video* bitrate to fit into target_size_mb including audio."""
     target_bytes = target_size_mb * 1024 * 1024
     total_bps = (target_bytes * 8) / max(duration_s, 1e-6)
     total_kbps = int(total_bps / 1000)
 
-    video_kbps = total_kbps - int(audio_kbps) - 128
+    # Reserve audio + container overhead.
+    video_kbps = total_kbps - audio_kbps - 128
     return max(800, min(video_kbps, 30000))
 
 
-def transcode_for_kling(
+def transcode_video_for_kling(
     input_path: Path,
     output_path: Path,
     *,
-    duration_s: float,
-    max_seconds: int = 30,
-    max_height: int = 1080,
+    max_seconds: int,
     target_size_mb: int = 95,
     fps: int = 30,
+    max_height: int = 1080,
     audio_kbps: int = 128,
-) -> Tuple[Path, int]:
-    """Transcode video to an mp4 suitable for Kling constraints.
+) -> TranscodeResult:
+    """Transcode input video into an MP4 suitable for Kling constraints.
 
-    - trims to max_seconds
-    - converts to H.264 mp4
-    - keeps audio (AAC) for later socials usage
-    - caps height to max_height (keeps aspect ratio)
-    - targets roughly target_size_mb
-
-    Returns (output_path, used_video_bitrate_kbps)
+    - Keeps audio (AAC)
+    - Forces duration cap (max_seconds)
+    - Attempts to keep resulting file under target_size_mb
     """
+    if not input_path.exists():
+        raise FileNotFoundError(str(input_path))
+
+    duration = probe_duration_seconds(input_path)
+    if duration is None:
+        raise RuntimeError("Cannot detect video duration")
+
+    if duration > float(max_seconds) + 0.15:
+        raise RuntimeError(f"Video too long: {duration:.2f}s (limit {max_seconds}s)")
+
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    exe = _ffmpeg_exe()
+    # Scale down if needed; keep aspect ratio.
+    vf = f"scale=-2:min({max_height},ih)"
+    v_kbps = _calc_target_video_bitrate_kbps(duration, target_size_mb, audio_kbps=audio_kbps)
 
-    # Scale expression: if height > max_height -> scale down, else keep original.
-    vf = f"scale='if(gt(ih,{max_height}),-2,iw)':'if(gt(ih,{max_height}),{max_height},ih)'"
-
-    bitrate_kbps = _calc_target_video_bitrate_kbps(duration_s, target_size_mb, audio_kbps=audio_kbps)
-
+    exe = get_ffmpeg_exe()
     cmd = [
         exe,
         "-y",
-        "-hide_banner",
         "-i",
         str(input_path),
         "-t",
         str(int(max_seconds)),
-
-        # Map video and audio (audio optional)
         "-map",
         "0:v:0",
         "-map",
         "0:a?",
-
         "-vf",
         vf,
         "-r",
@@ -90,28 +87,35 @@ def transcode_for_kling(
         "-c:v",
         "libx264",
         "-preset",
-        "veryfast",
+        os.getenv("FFMPEG_X264_PRESET", "veryfast"),
         "-b:v",
-        f"{bitrate_kbps}k",
+        f"{v_kbps}k",
         "-maxrate",
-        f"{bitrate_kbps}k",
+        f"{v_kbps}k",
         "-bufsize",
-        f"{bitrate_kbps * 2}k",
+        f"{v_kbps * 2}k",
         "-pix_fmt",
         "yuv420p",
-
-        # Keep audio
         "-c:a",
         "aac",
         "-b:a",
-        f"{int(audio_kbps)}k",
+        f"{audio_kbps}k",
         "-ac",
         "2",
-
         "-movflags",
         "+faststart",
         str(output_path),
     ]
 
-    _run(cmd)
-    return output_path, bitrate_kbps
+    p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    if p.returncode != 0:
+        raise RuntimeError(f"ffmpeg failed ({p.returncode}): {p.stderr[-2000:]}")
+
+    size = output_path.stat().st_size
+    return TranscodeResult(
+        output_path=output_path,
+        duration_seconds=float(duration),
+        output_size_bytes=int(size),
+        video_bitrate_kbps=int(v_kbps),
+        audio_bitrate_kbps=int(audio_kbps),
+    )
