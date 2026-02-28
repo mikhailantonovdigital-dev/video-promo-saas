@@ -722,93 +722,86 @@ async def cabinet_upload_video_refs(
     root = _storage_root()
     now = _now()
 
+    # лимиты (можешь оставить как у тебя уже сделано)
+    max_mb = int(os.getenv("VIDEO_REF_MAX_UPLOAD_MB", "1024"))
+    max_bytes = max_mb * 1024 * 1024
+    chunk_bytes = int(os.getenv("UPLOAD_CHUNK_BYTES", str(1024 * 1024)))  # 1MB
+
     created_any = False
-for f in files:
-    safe_name = (f.filename or "video.mp4").replace("/", "_").replace("\\", "_")
 
-    rel = (
-        Path("uploads")
-        / "u"
-        / str(user.id)
-        / "o"
-        / str(order.id)
-        / "video_refs"
-        / f"{uuid.uuid4().hex}_{safe_name}"
-    )
-    abs_path = root / rel
-    abs_path.parent.mkdir(parents=True, exist_ok=True)
-
-    hasher = hashlib.sha256()
-    size = 0
-
-    try:
-        with abs_path.open("wb") as out:
-            while True:
-                chunk = await f.read(UPLOAD_CHUNK_BYTES)
-                if not chunk:
-                    break
-                size += len(chunk)
-                if size > VIDEO_REF_MAX_UPLOAD_BYTES:
-                    # удаляем недогруженный файл
-                    try:
-                        out.close()
-                    finally:
-                        try:
-                            abs_path.unlink(missing_ok=True)
-                        except Exception:
-                            pass
-                    raise HTTPException(
-                        status_code=413,
-                        detail=f"Файл слишком большой. Максимум: {VIDEO_REF_MAX_UPLOAD_MB} MB",
-                    )
-
-                hasher.update(chunk)
-                out.write(chunk)
-    finally:
-        try:
-            await f.close()
-        except Exception:
-            pass
-
-    if size == 0:
-        # пустой файл
-        try:
-            abs_path.unlink(missing_ok=True)
-        except Exception:
-            pass
-        continue
-
-    created_any = True
-    sha = hasher.hexdigest()
-
-    db.add(
-        Asset(
-            user_id=user.id,
-            order_id=order.id,
-            kind="video_ref",
-            storage_driver="local",
-            storage_key=str(rel),
-            filename=safe_name,
-            content_type=f.content_type or "application/octet-stream",
-            size_bytes=size,
-            sha256=sha,
-            delete_after=now + timedelta(days=FILES_TTL_DAYS),
+    for f in files:
+        safe_name = (f.filename or "video.mp4").replace("/", "_").replace("\\", "_")
+        rel = (
+            Path("uploads")
+            / "u"
+            / str(user.id)
+            / "o"
+            / str(order.id)
+            / "video_refs"
+            / f"{uuid.uuid4().hex}_{safe_name}"
         )
-    )
+        abs_path = root / rel
+        abs_path.parent.mkdir(parents=True, exist_ok=True)
+
+        hasher = hashlib.sha256()
+        size = 0
+
+        try:
+            with abs_path.open("wb") as out:
+                while True:
+                    chunk = await f.read(chunk_bytes)
+                    if not chunk:
+                        break
+
+                    size += len(chunk)
+                    if size > max_bytes:
+                        try:
+                            out.close()
+                        finally:
+                            try:
+                                abs_path.unlink(missing_ok=True)
+                            except Exception:
+                                pass
+                        raise HTTPException(status_code=413, detail=f"Файл слишком большой. Максимум: {max_mb} MB")
+
+                    hasher.update(chunk)
+                    out.write(chunk)
+        finally:
+            try:
+                await f.close()
+            except Exception:
+                pass
+
+        if size == 0:
+            try:
+                abs_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+            continue
+
+        created_any = True
+
+        db.add(
+            Asset(
+                user_id=user.id,
+                order_id=order.id,
+                kind="video_ref",
+                storage_driver="local",
+                storage_key=str(rel),
+                filename=safe_name,
+                content_type=f.content_type or "application/octet-stream",
+                size_bytes=size,
+                sha256=hasher.hexdigest(),
+                delete_after=now + timedelta(days=FILES_TTL_DAYS),
+            )
+        )
+
     if not created_any:
         raise HTTPException(status_code=400, detail="All uploaded files were empty")
 
-    # Переводим в Kling processing + создаём video_jobs (если ещё нет)
+    # дальше как у тебя: перевод статуса
     order.status = "kling_processing"
     order.updated_at = now
-
-    # flush чтобы только что добавленные assets появились в SELECT внутри ensure_video_jobs
-    await db.flush()
-    try:
-        await ensure_video_jobs_for_order(db, order)
-    except Exception:
-        # если что-то не так (нет выбранных картинок и т.п.) — не валим загрузку рефов.
-        pass
     await db.commit()
 
     return RedirectResponse(f"/cabinet/orders/{order.id}", status_code=302)
