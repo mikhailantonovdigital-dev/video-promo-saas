@@ -41,6 +41,9 @@ from app.services.video_transcode import transcode_for_kling
 router = APIRouter(prefix="/cabinet", tags=["cabinet"], include_in_schema=False)
 
 FILES_TTL_DAYS = int(os.getenv("FILES_TTL_DAYS", "30"))
+VIDEO_REF_MAX_UPLOAD_MB = int(os.getenv("VIDEO_REF_MAX_UPLOAD_MB", "1024"))  # сколько принимать от клиента (1 ГБ по умолчанию)
+VIDEO_REF_MAX_UPLOAD_BYTES = VIDEO_REF_MAX_UPLOAD_MB * 1024 * 1024
+UPLOAD_CHUNK_BYTES = int(os.getenv("UPLOAD_CHUNK_BYTES", str(1024 * 1024)))  # 1 МБ
 FACE_PROFILE_TTL_DAYS = int(os.getenv("FACE_PROFILE_TTL_DAYS", "365"))
 
 # Ограничения Kling Motion Control (реф-видео)
@@ -720,188 +723,78 @@ async def cabinet_upload_video_refs(
     now = _now()
 
     created_any = False
-    for f in files:
-        # Пишем на диск потоково (чтобы не держать сотни МБ в памяти)
-        safe_name = (f.filename or "video.mov").replace("/", "_").replace("\\", "_")
-        rel = Path("uploads") / "u" / str(user.id) / "o" / str(order.id) / "video_refs" / f"{uuid.uuid4().hex}_{safe_name}"
-        abs_path = root / rel
-        abs_path.parent.mkdir(parents=True, exist_ok=True)
+for f in files:
+    safe_name = (f.filename or "video.mp4").replace("/", "_").replace("\\", "_")
 
-        h = hashlib.sha256()
-        size_bytes = 0
+    rel = (
+        Path("uploads")
+        / "u"
+        / str(user.id)
+        / "o"
+        / str(order.id)
+        / "video_refs"
+        / f"{uuid.uuid4().hex}_{safe_name}"
+    )
+    abs_path = root / rel
+    abs_path.parent.mkdir(parents=True, exist_ok=True)
+
+    hasher = hashlib.sha256()
+    size = 0
+
+    try:
+        with abs_path.open("wb") as out:
+            while True:
+                chunk = await f.read(UPLOAD_CHUNK_BYTES)
+                if not chunk:
+                    break
+                size += len(chunk)
+                if size > VIDEO_REF_MAX_UPLOAD_BYTES:
+                    # удаляем недогруженный файл
+                    try:
+                        out.close()
+                    finally:
+                        try:
+                            abs_path.unlink(missing_ok=True)
+                        except Exception:
+                            pass
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"Файл слишком большой. Максимум: {VIDEO_REF_MAX_UPLOAD_MB} MB",
+                    )
+
+                hasher.update(chunk)
+                out.write(chunk)
+    finally:
         try:
-            with abs_path.open("wb") as out:
-                while True:
-                    chunk = await f.read(1024 * 1024)
-                    if not chunk:
-                        break
-                    out.write(chunk)
-                    h.update(chunk)
-                    size_bytes += len(chunk)
-        finally:
             await f.close()
+        except Exception:
+            pass
 
-        if size_bytes == 0:
-            # пустой файл пропускаем
-            try:
-                abs_path.unlink(missing_ok=True)
-            except Exception:
-                pass
-            continue
+    if size == 0:
+        # пустой файл
+        try:
+            abs_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        continue
 
-        created_any = True
+    created_any = True
+    sha = hasher.hexdigest()
 
-        # Максимальный размер загрузки (входящий)
-        max_upload_bytes = VIDEO_REF_MAX_UPLOAD_MB * 1024 * 1024
-        if size_bytes > max_upload_bytes:
-            try:
-                abs_path.unlink(missing_ok=True)
-            except Exception:
-                pass
-            raise HTTPException(
-                status_code=400,
-                detail=f"Файл '{safe_name}' слишком большой: {size_bytes / (1024*1024):.1f}MB. "
-                       f"Максимум для загрузки: {VIDEO_REF_MAX_UPLOAD_MB}MB.",
-            )
-
-        # Длительность (по доке Kling: max 30s при character_orientation=video)
-        max_seconds = int(os.getenv("VIDEO_REF_MAX_SECONDS", "30"))
-        duration = probe_duration_seconds(abs_path)
-        if duration is None:
-            try:
-                abs_path.unlink(missing_ok=True)
-            except Exception:
-                pass
-            raise HTTPException(
-                status_code=400,
-                detail=f"Не удалось определить длительность видео '{safe_name}'. "
-                       f"Загрузите MP4/MOV без повреждений.",
-            )
-
-        if duration > float(max_seconds) + 0.05:
-            try:
-                abs_path.unlink(missing_ok=True)
-            except Exception:
-                pass
-            raise HTTPException(
-                status_code=400,
-                detail=f"Видео '{safe_name}' длится {duration:.1f} сек. "
-                       f"Максимальная длительность: {max_seconds} сек.",
-            )
-
-        original_size = size_bytes
-        sha = h.hexdigest()
-        content_type = f.content_type or "application/octet-stream"
-
-        # Если файл тяжелее ограничения Kling (100MB) или не mp4 — сжимаем/перекодируем на сервере.
-        max_kling_bytes = KLING_MAX_REF_SIZE_MB * 1024 * 1024
-        transcoded = False
-        used_bitrate_kbps: int | None = None
-
-        needs_transcode = (size_bytes > max_kling_bytes) or (Path(safe_name).suffix.lower() != ".mp4")
-        if needs_transcode:
-            abs_path_orig = abs_path
-            out_name = f"{Path(safe_name).stem}.mp4"
-            rel2 = Path("uploads") / "u" / str(user.id) / "o" / str(order.id) / "video_refs" / f"{uuid.uuid4().hex}_transcoded_{out_name}"
-            abs_path2 = root / rel2
-
-            # 1-я попытка: целимся в 95MB
-            try:
-                _, used_bitrate_kbps = transcode_for_kling(
-                    abs_path,
-                    abs_path2,
-                    duration_s=float(duration),
-                    max_seconds=max_seconds,
-                    target_size_mb=min(95, KLING_MAX_REF_SIZE_MB - 1),
-                    max_height=int(os.getenv("VIDEO_REF_MAX_HEIGHT", "1080")),
-                )
-            except Exception as e:
-                # если ffmpeg не установлен/упал — говорим пользователю
-                try:
-                    abs_path.unlink(missing_ok=True)
-                except Exception:
-                    pass
-                raise HTTPException(
-                    status_code=500,
-                    detail=f"Не удалось сжать видео '{safe_name}'. "
-                           f"Проверь, что ffmpeg установлен на сервере. Ошибка: {type(e).__name__}",
-                )
-
-            # если все еще больше 100MB — 2-я попытка пожестче
-            if abs_path2.exists() and abs_path2.stat().st_size > max_kling_bytes:
-                abs_path2.unlink(missing_ok=True)
-                _, used_bitrate_kbps = transcode_for_kling(
-                    abs_path,
-                    abs_path2,
-                    duration_s=float(duration),
-                    max_seconds=max_seconds,
-                    target_size_mb=min(85, KLING_MAX_REF_SIZE_MB - 5),
-                    max_height=int(os.getenv("VIDEO_REF_MAX_HEIGHT", "1080")),
-                )
-
-            # финальная проверка
-            if not abs_path2.exists():
-                try:
-                    abs_path.unlink(missing_ok=True)
-                except Exception:
-                    pass
-                raise HTTPException(status_code=500, detail="Transcoding failed: output file not created")
-
-            size_bytes = int(abs_path2.stat().st_size)
-            if size_bytes > max_kling_bytes:
-                # даже после 2 попыток не влезли
-                try:
-                    abs_path.unlink(missing_ok=True)
-                except Exception:
-                    pass
-                try:
-                    abs_path2.unlink(missing_ok=True)
-                except Exception:
-                    pass
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Не удалось сжать '{safe_name}' до {KLING_MAX_REF_SIZE_MB}MB. "
-                           f"Попробуйте более короткое/простое видео.",
-                )
-
-            # пересчёт sha для результата
-            h2 = hashlib.sha256()
-            with abs_path2.open("rb") as inp:
-                for chunk in iter(lambda: inp.read(1024 * 1024), b""):
-                    h2.update(chunk)
-            sha = h2.hexdigest()
-            safe_name = out_name
-            content_type = "video/mp4"
-            rel = rel2
-            abs_path = abs_path2
-            transcoded = True
-
-            # удаляем оригинал (чтобы не занимал место)
-            try:
-                abs_path_orig.unlink(missing_ok=True)
-            except Exception:
-                pass
-
-        db.add(
-            Asset(
-                user_id=user.id,
-                order_id=order.id,
-                kind="video_ref",
-                storage_driver="local",
-                storage_key=str(rel),
-                filename=safe_name,
-                content_type=content_type,
-                size_bytes=size_bytes,
-                sha256=sha,
-                meta={
-                    "duration_seconds": float(duration),
-                    "original_size_bytes": int(original_size),
-                    "transcoded": bool(transcoded),
-                    "used_video_bitrate_kbps": used_bitrate_kbps,
-                },
-                delete_after=now + timedelta(days=FILES_TTL_DAYS),
-            )
+    db.add(
+        Asset(
+            user_id=user.id,
+            order_id=order.id,
+            kind="video_ref",
+            storage_driver="local",
+            storage_key=str(rel),
+            filename=safe_name,
+            content_type=f.content_type or "application/octet-stream",
+            size_bytes=size,
+            sha256=sha,
+            delete_after=now + timedelta(days=FILES_TTL_DAYS),
         )
+    )
     if not created_any:
         raise HTTPException(status_code=400, detail="All uploaded files were empty")
 
