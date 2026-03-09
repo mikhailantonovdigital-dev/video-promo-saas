@@ -11,7 +11,7 @@ from typing import Iterable, Any
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from fastapi.responses import HTMLResponse, RedirectResponse, FileResponse
-from sqlalchemy import select, delete
+from sqlalchemy import select, delete, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, get_db
@@ -434,7 +434,7 @@ async def cabinet_order(
 
     # Видео-джобы Kling
     video_jobs_html = ""
-    if order.status in {"kling_processing", "packaging", "done", "kling_failed"}:
+    if order.status in {"awaiting_video_refs", "kling_processing", "packaging", "done", "kling_failed"}:
         jq = await db.execute(
             select(VideoJob)
             .where(VideoJob.order_id == order.id, VideoJob.user_id == user.id)
@@ -457,6 +457,21 @@ async def cabinet_order(
                 <button class="btn" type="submit">Обновить статусы сейчас</button>
               </form>
               <p class="muted">Если фоновой поллер включён, статусы обновляются автоматически. Эта кнопка полезна для ручного теста.</p>
+            </div>
+            """
+
+        # Если заказ уже в kling_processing, но job'ов нет - показываем кнопку восстановления.
+        if not jobs and order.status in {"kling_processing", "awaiting_video_refs"} and video_ref_count > 0:
+            video_jobs_html = f"""
+            <div class="card">
+              <h3 style="margin-top:0">Kling: видео-джобы</h3>
+              <p class="muted">Видео-джобы не созданы. Обычно это значит, что не загружено фото-профиля или не выбрано изображение для референса.</p>
+              <form method="post" action="/cabinet/orders/{order.id}/ensure-video-jobs" style="margin-top:10px">
+                <button class="btn" type="submit">Создать видео-джобы</button>
+              </form>
+              <form method="post" action="/cabinet/orders/{order.id}/kling-poll" style="margin-top:10px">
+                <button class="btn" type="submit">Обновить статусы сейчас</button>
+              </form>
             </div>
             """
 
@@ -790,18 +805,38 @@ async def cabinet_upload_video_refs(
     if not created_any:
         raise HTTPException(status_code=400, detail="All uploaded files were empty")
 
-    # Переводим в Kling processing + создаём video_jobs (если ещё нет)
-    order.status = "kling_processing"
-    order.updated_at = now
-
     # flush чтобы только что добавленные assets появились в SELECT внутри ensure_video_jobs
     await db.flush()
+
+    # Пробуем создать video_jobs. Если не получилось (например, не выбран референс-имидж/нет фото профиля),
+    # НЕ переводим заказ в kling_processing (иначе он застрянет без job'ов).
+    err_msg = None
     try:
-        await ensure_video_jobs_for_order(db, order)
-    except Exception:
-        # если что-то не так (нет выбранных картинок и т.п.) — не валим загрузку рефов.
-        pass
+        created = await ensure_video_jobs_for_order(db, order)
+    except Exception as e:
+        created = 0
+        err_msg = str(e)
+
+    jq = await db.execute(
+        select(func.count(VideoJob.id)).where(VideoJob.order_id == order.id, VideoJob.user_id == user.id)
+    )
+    jobs_count = int(jq.scalar() or 0)
+
+    if jobs_count > 0:
+        order.status = "kling_processing"
+        order.updated_at = now
+        await db.commit()
+        return RedirectResponse(f"/cabinet/orders/{order.id}", status_code=302)
+
+    # Сохраняем загруженные видео-рефы, но оставляем заказ на шаге video-refs.
     await db.commit()
+    detail = (
+        "Видео загружено, но не удалось создать видео-джобы для Kling. "
+        "Проверь, что загружено фото-профиля (Шаг 1) и выбрано хотя бы одно изображение (Шаг 4)."
+    )
+    if err_msg:
+        detail += f" Причина: {err_msg}"
+    raise HTTPException(status_code=400, detail=detail)
 
     return RedirectResponse(f"/cabinet/orders/{order.id}", status_code=302)
 
@@ -824,9 +859,49 @@ async def cabinet_kling_poll_now(
         from app.workers.kling_poller import process_kling_jobs_once
 
         await process_kling_jobs_once(order_id=order.id)
-    except Exception:
-        pass
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Kling poll error: {e}")
 
+    return RedirectResponse(f"/cabinet/orders/{order.id}", status_code=302)
+
+
+@router.post("/orders/{order_id}/ensure-video-jobs")
+async def cabinet_ensure_video_jobs_now(
+    order_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Ручное создание video_jobs (если заказ застрял без job'ов)."""
+    _ensure_enabled()
+
+    oq = await db.execute(select(Order).where(Order.id == order_id, Order.user_id == user.id))
+    order = oq.scalar_one_or_none()
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    await db.flush()
+    try:
+        await ensure_video_jobs_for_order(db, order)
+    except Exception as e:
+        await db.commit()
+        raise HTTPException(status_code=400, detail=f"Не удалось создать видео-джобы: {e}")
+
+    jq = await db.execute(
+        select(func.count(VideoJob.id)).where(VideoJob.order_id == order.id, VideoJob.user_id == user.id)
+    )
+    jobs_count = int(jq.scalar() or 0)
+    if jobs_count <= 0:
+        await db.commit()
+        raise HTTPException(
+            status_code=400,
+            detail="Видео-джобы не созданы. Проверь фото-профиль и выбранные изображения.",
+        )
+
+    if order.status in {"awaiting_video_refs", "kling_processing"}:
+        order.status = "kling_processing"
+        order.updated_at = _now()
+
+    await db.commit()
     return RedirectResponse(f"/cabinet/orders/{order.id}", status_code=302)
 
 
