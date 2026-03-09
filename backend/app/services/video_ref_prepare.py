@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import os
 from datetime import datetime, timedelta, timezone
@@ -12,6 +13,9 @@ from app.models.asset import Asset
 from app.services.storage import safe_join_storage, storage_root
 from app.services.video_transcode import transcode_video_for_kling
 from app.services.ffmpeg_tools import probe_duration_seconds
+
+
+_TRANSCODE_LOCK = asyncio.Lock()
 
 
 def _now() -> datetime:
@@ -63,7 +67,7 @@ async def ensure_prepared_video_ref(db: AsyncSession, *, src: Asset) -> Asset:
 
     abs_src = safe_join_storage(src.storage_key)
     if not abs_src.exists():
-        raise RuntimeError("Source video file not found")
+        raise RuntimeError(f"Source video file not found: {abs_src} (hint: use Render Disk + LOCAL_STORAGE_DIR)")
 
     max_seconds = kling_max_seconds()
     duration = probe_duration_seconds(abs_src)
@@ -97,15 +101,16 @@ async def ensure_prepared_video_ref(db: AsyncSession, *, src: Asset) -> Asset:
     )
     abs_out = storage_root() / rel_out
 
-    res = transcode_video_for_kling(
-        abs_src,
-        abs_out,
-        max_seconds=max_seconds,
-        target_size_mb=target_size_mb,
-        fps=_env_int("KLING_TRANSCODE_FPS", 30),
-        max_height=_env_int("KLING_TRANSCODE_MAX_HEIGHT", 1080),
-        audio_kbps=_env_int("KLING_TRANSCODE_AUDIO_KBPS", 128),
-    )
+    async with _TRANSCODE_LOCK:
+        res = transcode_video_for_kling(
+            abs_src,
+            abs_out,
+            max_seconds=max_seconds,
+            target_size_mb=target_size_mb,
+            fps=_env_int("KLING_TRANSCODE_FPS", 30),
+            max_height=_env_int("KLING_TRANSCODE_MAX_HEIGHT", 1080),
+            audio_kbps=_env_int("KLING_TRANSCODE_AUDIO_KBPS", 128),
+        )
 
     if res.output_size_bytes > max_size_bytes:
         raise RuntimeError(
@@ -113,8 +118,12 @@ async def ensure_prepared_video_ref(db: AsyncSession, *, src: Asset) -> Asset:
         )
 
     # hash
-    sha = hashlib.sha256(res.output_path.read_bytes()).hexdigest()
-
+    # stream hash (avoid loading file into memory)
+    h = hashlib.sha256()
+    with res.output_path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    sha = h.hexdigest()
     ttl_days = _env_int("FILES_TTL_DAYS", 30)
     now = _now()
     prepared = Asset(
