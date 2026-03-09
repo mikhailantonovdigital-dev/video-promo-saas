@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import os
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
@@ -297,17 +298,15 @@ async def _maybe_update_order_status(db: AsyncSession, order_id) -> None:
         order.updated_at = _now()
 
 
-import uuid
-from typing import Optional
+async def process_kling_jobs_once(order_id: Optional[str] = None) -> int:
+    """Один проход поллера. Возвращает количество обработанных джоб.
 
-
-async def process_kling_jobs_once(order_id: Optional[uuid.UUID] = None) -> int:
-    """Один проход поллера. Возвращает количество обработанных джоб."""
+    Если передан order_id — обрабатываем job'ы только этого заказа (удобно для кнопки в кабинете).
+    """
     processed = 0
     now = _now()
 
     async with AsyncSessionLocal() as db:
-        # берём пачку job'ов с блокировкой
         stmt = (
             select(VideoJob)
             .where(VideoJob.provider == "kling")
@@ -315,14 +314,20 @@ async def process_kling_jobs_once(order_id: Optional[uuid.UUID] = None) -> int:
             .where(or_(VideoJob.next_poll_at.is_(None), VideoJob.next_poll_at <= now))
         )
 
-        if order_id is not None:
-            stmt = stmt.where(VideoJob.order_id == order_id)
+        if order_id:
+            try:
+                oid = uuid.UUID(str(order_id))
+            except Exception:
+                oid = None
+            if oid:
+                stmt = stmt.where(VideoJob.order_id == oid)
 
         stmt = (
             stmt.order_by(VideoJob.created_at.asc())
             .limit(BATCH_SIZE)
             .with_for_update(skip_locked=True)
         )
+
         q = await db.execute(stmt)
         jobs = q.scalars().all()
 
@@ -336,12 +341,19 @@ async def process_kling_jobs_once(order_id: Optional[uuid.UUID] = None) -> int:
                 await _maybe_update_order_status(db, job.order_id)
                 processed += 1
             except Exception as e:
-                # не валим поллер целиком
-                job.status = "failed"
+                # не валим поллер целиком: сохраняем ошибку и попробуем ещё раз
+                now2 = _now()
                 job.error_message = str(e)
-                job.finished_at = _now()
-                job.next_poll_at = None
-                job.updated_at = _now()
+                job.attempts = int(job.attempts or 0) + 1
+                job.updated_at = now2
+
+                if job.attempts >= MAX_ATTEMPTS:
+                    job.status = "failed"
+                    job.finished_at = now2
+                    job.next_poll_at = None
+                else:
+                    job.status = "queued"
+                    job.next_poll_at = now2 + timedelta(seconds=POLL_INTERVAL_SECONDS)
 
         await db.commit()
 
