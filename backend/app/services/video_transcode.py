@@ -71,6 +71,10 @@ def transcode_video_for_kling(
     exe = get_ffmpeg_exe()
     cmd = [
         exe,
+        "-hide_banner",
+        "-loglevel",
+        os.getenv("FFMPEG_LOGLEVEL", "error"),
+        "-nostats",
         "-y",
         "-i",
         str(input_path),
@@ -84,10 +88,12 @@ def transcode_video_for_kling(
         vf,
         "-r",
         str(int(fps)),
+        "-threads",
+        os.getenv("FFMPEG_THREADS", "1"),
         "-c:v",
         "libx264",
         "-preset",
-        os.getenv("FFMPEG_X264_PRESET", "veryfast"),
+        os.getenv("FFMPEG_X264_PRESET", "ultrafast"),
         "-b:v",
         f"{v_kbps}k",
         "-maxrate",
@@ -106,10 +112,27 @@ def transcode_video_for_kling(
         "+faststart",
         str(output_path),
     ]
+    # Avoid capturing huge ffmpeg logs into memory. Keep only last ~16KB of stderr.
+    p = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=False)
+    assert p.stderr is not None
+    tail_chunks: list[bytes] = []
+    max_tail = int(os.getenv("FFMPEG_STDERR_TAIL_BYTES", str(16 * 1024)))
+    collected = 0
+    while True:
+        chunk = p.stderr.read(256)
+        if not chunk:
+            break
+        tail_chunks.append(chunk)
+        collected += len(chunk)
+        # trim from the start if too big
+        while collected > max_tail and tail_chunks:
+            removed = tail_chunks.pop(0)
+            collected -= len(removed)
+    rc = p.wait()
+    if rc != 0:
+        tail = b"".join(tail_chunks).decode("utf-8", errors="replace")
+        raise RuntimeError(f"ffmpeg failed ({rc}): {tail}")
 
-    p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    if p.returncode != 0:
-        raise RuntimeError(f"ffmpeg failed ({p.returncode}): {p.stderr[-2000:]}")
 
     size = output_path.stat().st_size
     return TranscodeResult(
