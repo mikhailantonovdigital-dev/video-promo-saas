@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import os
-import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
@@ -298,11 +297,17 @@ async def _maybe_update_order_status(db: AsyncSession, order_id) -> None:
         order.updated_at = _now()
 
 
+import uuid
+from typing import Optional
+
+
 async def process_kling_jobs_once(order_id: Optional[uuid.UUID] = None) -> int:
+    """Один проход поллера. Возвращает количество обработанных джоб."""
     processed = 0
     now = _now()
 
     async with AsyncSessionLocal() as db:
+        # берём пачку job'ов с блокировкой
         stmt = (
             select(VideoJob)
             .where(VideoJob.provider == "kling")
@@ -318,7 +323,6 @@ async def process_kling_jobs_once(order_id: Optional[uuid.UUID] = None) -> int:
             .limit(BATCH_SIZE)
             .with_for_update(skip_locked=True)
         )
-
         q = await db.execute(stmt)
         jobs = q.scalars().all()
 
