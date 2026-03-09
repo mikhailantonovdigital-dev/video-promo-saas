@@ -823,7 +823,7 @@ async def cabinet_kling_poll_now(
     try:
         from app.workers.kling_poller import process_kling_jobs_once
 
-        await process_kling_jobs_once()
+        await process_kling_jobs_once(order_id=order.id)
     except Exception:
         pass
 
