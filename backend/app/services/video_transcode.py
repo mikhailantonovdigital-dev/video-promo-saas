@@ -65,7 +65,7 @@ def transcode_video_for_kling(
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Scale down if needed; keep aspect ratio.
-    vf = f"scale=-2:min({max_height},ih)"
+    vf = f"scale=-2:min({max_height}\\,ih)"
     v_kbps = _calc_target_video_bitrate_kbps(duration, target_size_mb, audio_kbps=audio_kbps)
 
     exe = get_ffmpeg_exe()
