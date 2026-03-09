@@ -17,7 +17,7 @@ class KlingAPIError(RuntimeError):
     request_id: Optional[str] = None
     payload: Optional[dict[str, Any]] = None
 
-    def __str__(self) -> str:  # pragma: no cover
+    def __str__(self) -> str:
         rid = f" request_id={self.request_id}" if self.request_id else ""
         api_code = f" code={self.code}" if self.code is not None else ""
         return f"Kling API error: http={self.status_code}{api_code}{rid} msg={self.message}"
@@ -37,7 +37,6 @@ def _ensure_bearer(token: str) -> str:
 
 
 def _make_jwt_token() -> str:
-    """Generate Kling JWT token from access/secret (HS256)."""
     access_key = os.getenv("KLING_ACCESS_KEY")
     secret_key = os.getenv("KLING_SECRET_KEY")
     if not access_key or not secret_key:
@@ -56,8 +55,6 @@ def _auth_header_value() -> str:
 
 
 class KlingClient:
-    """Tiny async HTTP client for Kling API."""
-
     def __init__(self, *, timeout: float = 60.0):
         self._timeout = timeout
 
@@ -78,29 +75,30 @@ class KlingClient:
 
         status_code = resp.status_code
         try:
-            data = resp.json()
+            payload = resp.json()
         except Exception:
-            raise KlingAPIError(status_code=status_code, code=None, message=resp.text[:500])
+            raise KlingAPIError(status_code=status_code, code=None, message=(resp.text or "")[:500])
 
         if status_code >= 400:
             raise KlingAPIError(
                 status_code=status_code,
-                code=data.get("code"),
-                message=str(data.get("message") or data)[:500],
-                request_id=data.get("request_id"),
-                payload=data,
+                code=payload.get("code"),
+                message=str(payload.get("message") or payload)[:500],
+                request_id=payload.get("request_id"),
+                payload=payload,
             )
 
-        if isinstance(data, dict) and data.get("code") not in (0, None):
+        # Kling style: {"code":0,...}
+        if isinstance(payload, dict) and payload.get("code") not in (0, None):
             raise KlingAPIError(
                 status_code=status_code,
-                code=data.get("code"),
-                message=str(data.get("message") or data)[:500],
-                request_id=data.get("request_id"),
-                payload=data,
+                code=payload.get("code"),
+                message=str(payload.get("message") or payload)[:500],
+                request_id=payload.get("request_id"),
+                payload=payload,
             )
 
-        return data
+        return payload
 
 
 def extract_task_id(resp: dict[str, Any]) -> Optional[str]:
@@ -119,7 +117,5 @@ def extract_video_url(resp: dict[str, Any]) -> Optional[str]:
     videos = tr.get("videos") or []
     if isinstance(videos, list) and videos:
         v0 = videos[0] or {}
-        url = v0.get("url")
-        if url:
-            return url
-    return data.get("video_url") or data.get("videoUrl")
+        return v0.get("url") or v0.get("watermark_url")
+    return None
